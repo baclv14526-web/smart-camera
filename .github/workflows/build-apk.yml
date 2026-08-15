@@ -1,0 +1,113 @@
+name: Build APK
+
+on:
+  push:
+    branches:
+      - main
+      - master
+  pull_request:
+    branches:
+      - main
+      - master
+  # Cho phép chạy thủ công từ tab Actions
+  workflow_dispatch:
+
+jobs:
+  build:
+    name: Build Flutter APK
+    runs-on: ubuntu-latest
+
+    steps:
+      # ── 1. Checkout code ────────────────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Cài Java 17 (bắt buộc cho Android Gradle) ────────────────────────
+      - name: Set up Java 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      # ── 3. Cài Flutter stable ────────────────────────────────────────────────
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: stable
+          cache: true
+
+      # ── 4. Kiểm tra môi trường ───────────────────────────────────────────────
+      - name: Flutter doctor
+        run: flutter doctor -v
+
+      # ── 5. Cài dependencies ──────────────────────────────────────────────────
+      - name: Install dependencies
+        run: flutter pub get
+
+      # ── 6. Phân tích code (không block build nếu có warning) ─────────────────
+      - name: Analyze code
+        run: flutter analyze --no-fatal-infos
+        continue-on-error: true
+
+      # ── 7. Build APK release (split theo ABI để nhỏ hơn) ────────────────────
+      - name: Build APK
+        run: |
+          flutter build apk --release --split-per-abi \
+            --dart-define=FLUTTER_BUILD_NUMBER=${{ github.run_number }}
+
+      # ── 8. Đổi tên file APK cho dễ nhận biết ─────────────────────────────────
+      - name: Rename APKs
+        run: |
+          cd build/app/outputs/flutter-apk
+          COMMIT=$(echo "${{ github.sha }}" | cut -c1-7)
+          BUILD=${{ github.run_number }}
+
+          mv app-arm64-v8a-release.apk    camera-app-arm64-v${BUILD}-${COMMIT}.apk    || true
+          mv app-armeabi-v7a-release.apk  camera-app-armv7-v${BUILD}-${COMMIT}.apk    || true
+          mv app-x86_64-release.apk       camera-app-x86_64-v${BUILD}-${COMMIT}.apk   || true
+
+          echo "=== APK files ==="
+          ls -lh *.apk
+
+      # ── 9. Upload APK làm artifact (lưu 30 ngày) ─────────────────────────────
+      - name: Upload APK artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: camera-app-apk-build-${{ github.run_number }}
+          path: build/app/outputs/flutter-apk/*.apk
+          retention-days: 30
+
+      # ── 10. Tạo GitHub Release tự động khi push lên main/master ──────────────
+      - name: Create GitHub Release
+        if: github.event_name == 'push' && (github.ref == 'refs/heads/main' || github.ref == 'refs/heads/master')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: "Build #${{ github.run_number }} (${GITHUB_SHA::7})"
+          body: |
+            ## 📦 Camera App – Build #${{ github.run_number }}
+
+            **Commit:** `${{ github.sha }}`
+            **Branch:** `${{ github.ref_name }}`
+            **Thời gian:** ${{ github.event.head_commit.timestamp }}
+
+            ### 📥 Tải APK
+            | File | Dành cho |
+            |------|----------|
+            | `camera-app-arm64-v8a-*` | ✅ Điện thoại mới (64-bit) – **dùng cái này** |
+            | `camera-app-armeabi-v7a-*` | Điện thoại cũ (32-bit) |
+            | `camera-app-x86_64-*` | Máy ảo / giả lập |
+
+            ### 🔧 Cách cài đặt
+            1. Tải file `arm64` về điện thoại
+            2. Bật **Cài từ nguồn không rõ** trong Cài đặt
+            3. Mở file APK và cài đặt
+
+            ### 📝 Thay đổi
+            ${{ github.event.head_commit.message }}
+          files: build/app/outputs/flutter-apk/*.apk
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
