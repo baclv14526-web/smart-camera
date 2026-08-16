@@ -15,18 +15,45 @@ allprojects {
         google()
         mavenCentral()
     }
+    ext {
+        set("flutter", [
+            compileSdkVersion: 35,
+            minSdkVersion    : 21,
+            targetSdkVersion : 35,
+            ndkVersion       : "25.1.8937393"
+        ])
+    }
 }
 
 rootProject.buildDir = '../build'
 subprojects {
     project.buildDir = "${rootProject.buildDir}/${project.name}"
+    project.ext {
+        set("flutter", [
+            compileSdkVersion: 35,
+            minSdkVersion    : 21,
+            targetSdkVersion : 35,
+            ndkVersion       : "25.1.8937393"
+        ])
+    }
+}
+subprojects {
     project.evaluationDependsOn(':app')
 }
 
 subprojects {
-    def updateNamespace = { p ->
+    def configureProject = { p ->
         if (p.extensions.findByName("android") != null) {
             def android = p.extensions.findByName("android")
+            
+            // Fix compileSdk / compileSdkVersion for older plugins
+            try {
+                if (android.hasProperty("compileSdkVersion") && (android.compileSdkVersion == null || android.compileSdkVersion == "")) {
+                    android.compileSdkVersion = 35
+                }
+            } catch (Exception ignored) {}
+
+            // Fix namespace for legacy plugins without namespace
             if (android.hasProperty("namespace") && (android.namespace == null || android.namespace.isEmpty())) {
                 def manifestFile = p.file("src/main/AndroidManifest.xml")
                 if (manifestFile.exists()) {
@@ -45,10 +72,10 @@ subprojects {
     }
 
     if (project.state.executed) {
-        updateNamespace(project)
+        configureProject(project)
     } else {
         project.afterEvaluate {
-            updateNamespace(project)
+            configureProject(project)
         }
     }
 }
