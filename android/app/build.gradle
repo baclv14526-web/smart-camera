@@ -4,18 +4,9 @@ plugins {
     id "dev.flutter.flutter-gradle-plugin"
 }
 
-def localProperties = new Properties()
-def localPropertiesFile = rootProject.file('local.properties')
-if (localPropertiesFile.exists()) {
-    localPropertiesFile.withReader('UTF-8') { reader ->
-        localProperties.load(reader)
-    }
-}
-
 android {
     namespace "com.example.camera_app"
-    compileSdk 35
-    ndkVersion "25.1.8937393"
+    compileSdk 34
 
     compileOptions {
         sourceCompatibility JavaVersion.VERSION_17
@@ -23,13 +14,13 @@ android {
     }
 
     kotlinOptions {
-        jvmTarget = '17'
+        jvmTarget = "17"
     }
 
     defaultConfig {
         applicationId "com.example.camera_app"
         minSdk 21
-        targetSdk 35
+        targetSdk 34
         versionCode 1
         versionName "1.0.0"
     }
@@ -40,16 +31,9 @@ android {
             minifyEnabled false
             shrinkResources false
         }
-        debug {
-            signingConfig signingConfigs.debug
-        }
     }
 }
 
 flutter {
-    source '../..'
-}
-
-dependencies {
-    implementation "org.jetbrains.kotlin:kotlin-stdlib:$kotlin_version"
+    source "../.."
 }

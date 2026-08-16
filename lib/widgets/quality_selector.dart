@@ -5,15 +5,11 @@ class QualitySelector extends StatelessWidget {
   final ResolutionPreset selected;
   final ValueChanged<ResolutionPreset> onChanged;
 
-  const QualitySelector({
-    super.key,
-    required this.selected,
-    required this.onChanged,
-  });
+  const QualitySelector({super.key, required this.selected, required this.onChanged});
 
-  static const Map<ResolutionPreset, String> presetLabels = {
-    ResolutionPreset.high: 'HD',
-    ResolutionPreset.veryHigh: 'Full HD',
+  static const Map<ResolutionPreset, String> _labels = {
+    ResolutionPreset.high: 'HD  (720p)',
+    ResolutionPreset.veryHigh: 'Full HD  (1080p)',
   };
 
   @override
@@ -21,50 +17,33 @@ class QualitySelector extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'CHẤT LƯỢNG',
-          style: TextStyle(
-            color: Colors.white70,
-            fontSize: 12,
-            fontWeight: FontWeight.w500,
-            letterSpacing: 0.5,
-          ),
-        ),
-        const SizedBox(height: 6),
+        const Text('CHẤT LƯỢNG',
+            style: TextStyle(
+              color: Colors.white70, fontSize: 12,
+              fontWeight: FontWeight.w600, letterSpacing: 0.5)),
+        const SizedBox(height: 8),
         Row(
-          children: presetLabels.entries.map((entry) {
-            final isSelected = entry.key == selected;
+          children: _labels.entries.map((e) {
+            final sel = e.key == selected;
             return Padding(
               padding: const EdgeInsets.only(right: 8),
               child: GestureDetector(
-                onTap: () => onChanged(entry.key),
+                onTap: () => onChanged(e.key),
                 child: AnimatedContainer(
-                  duration: const Duration(milliseconds: 200),
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 16,
-                    vertical: 7,
-                  ),
+                  duration: const Duration(milliseconds: 180),
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 7),
                   decoration: BoxDecoration(
-                    color: isSelected
-                        ? const Color(0xFFFFD700)
-                        : Colors.white.withOpacity(0.1),
+                    color: sel ? const Color(0xFFFFD700) : Colors.white.withAlpha(25),
                     borderRadius: BorderRadius.circular(20),
                     border: Border.all(
-                      color: isSelected
-                          ? const Color(0xFFFFD700)
-                          : Colors.white24,
-                      width: 1,
-                    ),
+                      color: sel ? const Color(0xFFFFD700) : Colors.white24),
                   ),
-                  child: Text(
-                    entry.value,
+                  child: Text(e.value,
                     style: TextStyle(
-                      color: isSelected ? Colors.black : Colors.white,
+                      color: sel ? Colors.black : Colors.white,
                       fontSize: 13,
-                      fontWeight:
-                          isSelected ? FontWeight.bold : FontWeight.normal,
-                    ),
-                  ),
+                      fontWeight: sel ? FontWeight.bold : FontWeight.normal,
+                    )),
                 ),
               ),
             );

@@ -19,53 +19,35 @@ class TimerSelector extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          label,
-          style: const TextStyle(
-            color: Colors.white70,
-            fontSize: 12,
-            fontWeight: FontWeight.w500,
-            letterSpacing: 0.5,
-          ),
-        ),
-        const SizedBox(height: 6),
+        Text(label,
+            style: const TextStyle(
+              color: Colors.white70, fontSize: 12,
+              fontWeight: FontWeight.w600, letterSpacing: 0.5)),
+        const SizedBox(height: 8),
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
           child: Row(
-            children: options.map((option) {
-              final isSelected = option == selected;
+            children: options.map((opt) {
+              final sel = opt == selected;
               return Padding(
                 padding: const EdgeInsets.only(right: 8),
                 child: GestureDetector(
-                  onTap: () => onChanged(option),
+                  onTap: () => onChanged(opt),
                   child: AnimatedContainer(
-                    duration: const Duration(milliseconds: 200),
-                    padding: const EdgeInsets.symmetric(
-                      horizontal: 14,
-                      vertical: 7,
-                    ),
+                    duration: const Duration(milliseconds: 180),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
                     decoration: BoxDecoration(
-                      color: isSelected
-                          ? const Color(0xFFFFD700)
-                          : Colors.white.withOpacity(0.1),
+                      color: sel ? const Color(0xFFFFD700) : Colors.white.withAlpha(25),
                       borderRadius: BorderRadius.circular(20),
                       border: Border.all(
-                        color: isSelected
-                            ? const Color(0xFFFFD700)
-                            : Colors.white24,
-                        width: 1,
-                      ),
+                        color: sel ? const Color(0xFFFFD700) : Colors.white24),
                     ),
-                    child: Text(
-                      option,
+                    child: Text(opt,
                       style: TextStyle(
-                        color: isSelected ? Colors.black : Colors.white,
+                        color: sel ? Colors.black : Colors.white,
                         fontSize: 13,
-                        fontWeight: isSelected
-                            ? FontWeight.bold
-                            : FontWeight.normal,
-                      ),
-                    ),
+                        fontWeight: sel ? FontWeight.bold : FontWeight.normal,
+                      )),
                   ),
                 ),
               );
