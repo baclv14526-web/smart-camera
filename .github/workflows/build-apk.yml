@@ -22,20 +22,25 @@ jobs:
           distribution: temurin
           java-version: '17'
 
-      - name: Set up Flutter
+      # ── Dùng bản Flutter STABLE MỚI NHẤT (không pin version cũ) ──────────────
+      # Lý do: Flutter 3.24.x có bug không đọc đúng flutter.compileSdkVersion
+      # cho các plugin yêu cầu compileSdk 35 (package_info_plus, 
+      # flutter_plugin_android_lifecycle...). Bug này đã được fix trong các
+      # bản Flutter mới hơn → xem: github.com/flutter/flutter/issues/164369
+      - name: Set up Flutter (latest stable)
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.3'
           channel: stable
           cache: true
 
       - name: Write local.properties
         run: |
-          # Tìm Flutter SDK root (thư mục chứa /bin/flutter)
           FLUTTER_BIN=$(which flutter)
           FLUTTER_ROOT=$(dirname $(dirname $FLUTTER_BIN))
-          echo "sdk.dir=$ANDROID_SDK_ROOT"  >  android/local.properties
-          echo "flutter.sdk=$FLUTTER_ROOT"  >> android/local.properties
+          {
+            echo "sdk.dir=$ANDROID_SDK_ROOT"
+            echo "flutter.sdk=$FLUTTER_ROOT"
+          } > android/local.properties
           echo "--- local.properties ---"
           cat android/local.properties
           echo "--- Flutter version ---"
@@ -43,6 +48,9 @@ jobs:
 
       - name: Install dependencies
         run: flutter pub get
+
+      - name: Accept Android licenses
+        run: yes | sdkmanager --licenses > /dev/null 2>&1 || true
 
       - name: Analyze (non-blocking)
         run: flutter analyze --no-fatal-infos
