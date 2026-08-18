@@ -38,6 +38,13 @@ class _CameraScreenState extends State<CameraScreen>
   int _photoCountdown = 0;
   bool _isPhotoCountingDown = false;
 
+  // ── Burst / continuous shooting ──────────────────────────────────────────────
+  final List<int> _burstOptions = [0, 3, 5, 7, 9, 15]; // 0 = off
+  int _burstCount = 0; // number of frames; 0 means disabled
+  bool _isBursting = false;
+  int _burstProgress = 0; // frames captured so far
+  int _burstTotal = 0;    // frames requested for current burst
+
   // ── Video duration ───────────────────────────────────────────────────────────
   final List<String> _videoDurationOptions = [
     'Tắt', '15s', '30s', '1 phút', '3 phút', '5 phút', '10 phút',
@@ -238,13 +245,18 @@ class _CameraScreenState extends State<CameraScreen>
   // ── Photo capture ─────────────────────────────────────────────────────────────
   Future<void> _handleCapture() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
+    if (_isBursting) return; // ignore taps during burst
     if (_isPhotoCountingDown) {
       _cancelPhotoCountdown();
       return;
     }
     final delay = _photoTimerSeconds(_selectedPhotoTimer);
     if (delay == 0) {
-      await _takePhoto();
+      if (_burstCount > 0) {
+        await _takeBurstPhotos(_burstCount);
+      } else {
+        await _takePhoto();
+      }
     } else {
       _startPhotoCountdown(delay);
     }
@@ -259,7 +271,11 @@ class _CameraScreenState extends State<CameraScreen>
       if (_photoCountdown <= 1) {
         t.cancel();
         setState(() { _photoCountdown = 0; _isPhotoCountingDown = false; });
-        _takePhoto();
+        if (_burstCount > 0) {
+          _takeBurstPhotos(_burstCount);
+        } else {
+          _takePhoto();
+        }
       } else {
         setState(() => _photoCountdown--);
       }
@@ -271,6 +287,7 @@ class _CameraScreenState extends State<CameraScreen>
     setState(() { _photoCountdown = 0; _isPhotoCountingDown = false; });
   }
 
+  // ── Single photo ──────────────────────────────────────────────────────────────
   Future<void> _takePhoto() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
     setState(() => _isTakingPhoto = true);
@@ -287,6 +304,48 @@ class _CameraScreenState extends State<CameraScreen>
     } on CameraException catch (e) {
       setState(() => _isTakingPhoto = false);
       debugPrint('Take photo error: $e');
+    }
+  }
+
+  // ── Burst shooting ────────────────────────────────────────────────────────────
+  Future<void> _takeBurstPhotos(int count) async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+    setState(() {
+      _isBursting = true;
+      _burstProgress = 0;
+      _burstTotal = count;
+    });
+    final dir = await _getSaveDir(false);
+    String? lastPath;
+    int saved = 0;
+    for (int i = 0; i < count; i++) {
+      if (!mounted || _controller == null) break;
+      try {
+        setState(() { _isTakingPhoto = true; _burstProgress = i + 1; });
+        final xFile = await _controller!.takePicture();
+        final filePath = path.join(dir, 'BURST_${DateTime.now().millisecondsSinceEpoch}_${i + 1}.jpg');
+        await File(xFile.path).copy(filePath);
+        lastPath = filePath;
+        saved++;
+        setState(() => _isTakingPhoto = false);
+        // short gap between frames (~300 ms)
+        if (i < count - 1) await Future.delayed(const Duration(milliseconds: 300));
+      } on CameraException catch (e) {
+        setState(() => _isTakingPhoto = false);
+        debugPrint('Burst frame ${i + 1} error: $e');
+      }
+    }
+    setState(() {
+      _isBursting = false;
+      _burstProgress = 0;
+      _burstTotal = 0;
+      if (lastPath != null) {
+        _lastSavedPath = lastPath;
+        _lastSavedIsVideo = false;
+      }
+    });
+    if (mounted && saved > 0) {
+      _showSnackbar('✅ Đã lưu $saved/$count ảnh liên tiếp', Colors.green);
     }
   }
 
@@ -459,6 +518,55 @@ class _CameraScreenState extends State<CameraScreen>
           ),
         ),
 
+      // Burst progress overlay
+      if (_isBursting)
+        Positioned(
+          bottom: 16, left: 0, right: 0,
+          child: Center(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.black.withAlpha(180),
+                borderRadius: BorderRadius.circular(30),
+              ),
+              child: Row(mainAxisSize: MainAxisSize.min, children: [
+                const Icon(Icons.burst_mode, color: Color(0xFFFFD700), size: 20),
+                const SizedBox(width: 8),
+                Text(
+                  '$_burstProgress / $_burstTotal tấm',
+                  style: const TextStyle(
+                    color: Colors.white, fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ]),
+            ),
+          ),
+        ),
+
+      // Burst badge (top-left) when burst mode is active but not shooting
+      if (_burstCount > 0 && !_isBursting)
+        Positioned(
+          top: 10, left: 10,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFD700).withAlpha(220),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Row(mainAxisSize: MainAxisSize.min, children: [
+              const Icon(Icons.burst_mode, size: 13, color: Colors.black87),
+              const SizedBox(width: 4),
+              Text(
+                '$_burstCount tấm',
+                style: const TextStyle(
+                  color: Colors.black87, fontSize: 11,
+                  fontWeight: FontWeight.bold),
+              ),
+            ]),
+          ),
+        ),
+
       // Settings panel
       if (_showSettings) _buildSettingsPanel(),
 
@@ -521,6 +629,10 @@ class _CameraScreenState extends State<CameraScreen>
               ),
             ],
             const SizedBox(height: 20),
+            if (_mode == CameraMode.photo) ...[
+              _buildBurstSelector(),
+              const SizedBox(height: 20),
+            ],
             StorageSelector(
               selected: _storageLocation,
               sdcardAvailable: _sdcardAvailable,
@@ -608,6 +720,63 @@ class _CameraScreenState extends State<CameraScreen>
     ]);
   }
 
+  // ── Burst selector (inline widget) ────────────────────────────────────────────────
+  Widget _buildBurstSelector() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          'CHỤP LIÊN TIẾP',
+          style: TextStyle(
+            color: Colors.white70, fontSize: 12,
+            fontWeight: FontWeight.w600, letterSpacing: 0.5,
+          ),
+        ),
+        const SizedBox(height: 8),
+        SingleChildScrollView(
+          scrollDirection: Axis.horizontal,
+          child: Row(
+            children: _burstOptions.map((count) {
+              final isSelected = _burstCount == count;
+              final label = count == 0 ? 'Tắt' : '$count tấm';
+              return Padding(
+                padding: const EdgeInsets.only(right: 8),
+                child: GestureDetector(
+                  onTap: () => setState(() => _burstCount = count),
+                  child: AnimatedContainer(
+                    duration: const Duration(milliseconds: 180),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+                    decoration: BoxDecoration(
+                      color: isSelected ? const Color(0xFFFFD700) : Colors.white.withAlpha(25),
+                      borderRadius: BorderRadius.circular(20),
+                      border: Border.all(
+                        color: isSelected ? const Color(0xFFFFD700) : Colors.white24),
+                    ),
+                    child: Row(mainAxisSize: MainAxisSize.min, children: [
+                      if (count > 0) ...[
+                        const Icon(Icons.burst_mode, size: 14,
+                          color: Colors.black54),
+                        const SizedBox(width: 4),
+                      ],
+                      Text(
+                        label,
+                        style: TextStyle(
+                          color: isSelected ? Colors.black : Colors.white,
+                          fontSize: 13,
+                          fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                        ),
+                      ),
+                    ]),
+                  ),
+                ),
+              );
+            }).toList(),
+          ),
+        ),
+      ],
+    );
+  }
+
   Widget _buildShutterButton() {
     if (_mode == CameraMode.photo) {
       return GestureDetector(
@@ -625,7 +794,11 @@ class _CameraScreenState extends State<CameraScreen>
                 ? Text('$_photoCountdown',
                     style: const TextStyle(
                       color: Colors.white, fontSize: 30, fontWeight: FontWeight.bold))
-                : const Icon(Icons.camera_alt, color: Colors.black87, size: 36),
+                : _isBursting
+                    ? const Icon(Icons.burst_mode, color: Color(0xFFFFD700), size: 32)
+                    : _burstCount > 0
+                        ? const Icon(Icons.burst_mode, color: Colors.black87, size: 32)
+                        : const Icon(Icons.camera_alt, color: Colors.black87, size: 36),
           ),
         ),
       );
