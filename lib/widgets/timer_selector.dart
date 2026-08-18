@@ -5,6 +5,7 @@ class TimerSelector extends StatelessWidget {
   final String selected;
   final ValueChanged<String> onChanged;
   final String label;
+  final IconData? icon;
 
   const TimerSelector({
     super.key,
@@ -12,6 +13,7 @@ class TimerSelector extends StatelessWidget {
     required this.selected,
     required this.onChanged,
     required this.label,
+    this.icon,
   });
 
   @override
@@ -19,13 +21,27 @@ class TimerSelector extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(label,
-            style: const TextStyle(
-              color: Colors.white70, fontSize: 12,
-              fontWeight: FontWeight.w600, letterSpacing: 0.5)),
+        Row(
+          children: [
+            if (icon != null) ...[
+              Icon(icon, size: 16, color: const Color(0xFFFFD700)),
+              const SizedBox(width: 6),
+            ],
+            Text(
+              label,
+              style: const TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ],
+        ),
         const SizedBox(height: 8),
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
+          physics: const BouncingScrollPhysics(),
           child: Row(
             children: options.map((opt) {
               final sel = opt == selected;
@@ -35,19 +51,32 @@ class TimerSelector extends StatelessWidget {
                   onTap: () => onChanged(opt),
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 180),
-                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 7),
+                    padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                     decoration: BoxDecoration(
-                      color: sel ? const Color(0xFFFFD700) : Colors.white.withAlpha(25),
+                      color: sel ? const Color(0xFFFFD700) : const Color(0xFF2C2C2E),
                       borderRadius: BorderRadius.circular(20),
                       border: Border.all(
-                        color: sel ? const Color(0xFFFFD700) : Colors.white24),
+                        color: sel ? const Color(0xFFFFD700) : const Color(0xFF48484A),
+                        width: 1.2,
+                      ),
+                      boxShadow: sel
+                          ? [
+                              BoxShadow(
+                                color: const Color(0xFFFFD700).withAlpha(80),
+                                blurRadius: 8,
+                                offset: const Offset(0, 2),
+                              ),
+                            ]
+                          : null,
                     ),
-                    child: Text(opt,
+                    child: Text(
+                      opt,
                       style: TextStyle(
                         color: sel ? Colors.black : Colors.white,
                         fontSize: 13,
-                        fontWeight: sel ? FontWeight.bold : FontWeight.normal,
-                      )),
+                        fontWeight: sel ? FontWeight.bold : FontWeight.w500,
+                      ),
+                    ),
                   ),
                 ),
               );

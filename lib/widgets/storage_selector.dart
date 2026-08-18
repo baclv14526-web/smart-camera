@@ -19,14 +19,20 @@ class StorageSelector extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'LƯU VÀO',
-          style: TextStyle(
-            color: Colors.white70,
-            fontSize: 12,
-            fontWeight: FontWeight.w600,
-            letterSpacing: 0.5,
-          ),
+        const Row(
+          children: [
+            Icon(Icons.save_outlined, size: 16, color: Color(0xFFFFD700)),
+            SizedBox(width: 6),
+            Text(
+              'VỊ TRÍ LƯU TRỮ',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 8),
         Row(
@@ -38,10 +44,10 @@ class StorageSelector extends StatelessWidget {
               isEnabled: true,
               onTap: () => onChanged(StorageLocation.phone),
             ),
-            const SizedBox(width: 8),
+            const SizedBox(width: 10),
             _StorageOption(
               icon: Icons.sd_card,
-              label: 'Thẻ nhớ (SD)',
+              label: 'Thẻ nhớ microSD',
               isSelected: selected == StorageLocation.sdcard,
               isEnabled: sdcardAvailable,
               onTap: sdcardAvailable ? () => onChanged(StorageLocation.sdcard) : null,
@@ -49,11 +55,26 @@ class StorageSelector extends StatelessWidget {
           ],
         ),
         if (!sdcardAvailable)
-          const Padding(
-            padding: EdgeInsets.only(top: 6),
-            child: Text(
-              '⚠️ Không tìm thấy thẻ nhớ ngoài',
-              style: TextStyle(color: Colors.orange, fontSize: 11),
+          Padding(
+            padding: const EdgeInsets.only(top: 8),
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+              decoration: BoxDecoration(
+                color: Colors.orange.withAlpha(30),
+                borderRadius: BorderRadius.circular(8),
+                border: Border.all(color: Colors.orange.withAlpha(80)),
+              ),
+              child: const Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Icon(Icons.warning_amber_rounded, size: 14, color: Colors.orange),
+                  SizedBox(width: 6),
+                  Text(
+                    'Không phát hiện thẻ nhớ microSD ngoài',
+                    style: TextStyle(color: Colors.orange, fontSize: 11, fontWeight: FontWeight.w500),
+                  ),
+                ],
+              ),
             ),
           ),
       ],
@@ -81,18 +102,18 @@ class _StorageOption extends StatelessWidget {
     final color = isSelected
         ? const Color(0xFFFFD700)
         : isEnabled
-            ? Colors.white.withAlpha(25)
-            : Colors.white.withAlpha(10);
+            ? const Color(0xFF2C2C2E)
+            : const Color(0xFF1E1E20);
     final borderColor = isSelected
         ? const Color(0xFFFFD700)
         : isEnabled
-            ? Colors.white24
-            : Colors.white12;
+            ? const Color(0xFF48484A)
+            : const Color(0xFF333336);
     final textColor = isSelected
         ? Colors.black
         : isEnabled
             ? Colors.white
-            : Colors.white30;
+            : Colors.white38;
     final iconColor = isSelected
         ? Colors.black87
         : isEnabled
@@ -103,23 +124,32 @@ class _StorageOption extends StatelessWidget {
       onTap: onTap,
       child: AnimatedContainer(
         duration: const Duration(milliseconds: 180),
-        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
         decoration: BoxDecoration(
           color: color,
           borderRadius: BorderRadius.circular(20),
-          border: Border.all(color: borderColor),
+          border: Border.all(color: borderColor, width: 1.2),
+          boxShadow: isSelected
+              ? [
+                  BoxShadow(
+                    color: const Color(0xFFFFD700).withAlpha(80),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ]
+              : null,
         ),
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
-            Icon(icon, size: 16, color: iconColor),
+            Icon(icon, size: 17, color: iconColor),
             const SizedBox(width: 6),
             Text(
               label,
               style: TextStyle(
                 color: textColor,
                 fontSize: 13,
-                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
               ),
             ),
           ],
@@ -128,3 +158,4 @@ class _StorageOption extends StatelessWidget {
     );
   }
 }
+

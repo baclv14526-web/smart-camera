@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:ui' as ui;
 import 'package:flutter/material.dart';
 import 'package:camera/camera.dart';
 import 'package:path_provider/path_provider.dart';
@@ -9,6 +10,8 @@ import 'package:wakelock_plus/wakelock_plus.dart';
 import '../widgets/timer_selector.dart';
 import '../widgets/quality_selector.dart';
 import '../widgets/storage_selector.dart';
+import '../widgets/timestamp_selector.dart';
+import '../widgets/hdr_selector.dart';
 import 'preview_screen.dart';
 
 enum CameraMode { photo, video }
@@ -68,7 +71,14 @@ class _CameraScreenState extends State<CameraScreen>
   // ── Storage location ──────────────────────────────────────────────────────────
   StorageLocation _storageLocation = StorageLocation.phone;
   bool _sdcardAvailable = false;
+  String? _sdcardAppPath;
   String? _sdcardRootPath;
+
+  // ── Timestamp watermark ───────────────────────────────────────────────────────
+  bool _showTimestamp = true;
+
+  // ── HDR Mode ─────────────────────────────────────────────────────────────────
+  HdrMode _hdrMode = HdrMode.auto;
 
   // ── Flash ────────────────────────────────────────────────────────────────────
   FlashMode _flashMode = FlashMode.off;
@@ -108,21 +118,29 @@ class _CameraScreenState extends State<CameraScreen>
     try {
       final dirs = await getExternalStorageDirectories();
       if (dirs != null && dirs.length > 1) {
-        // dirs[0] = internal emulated storage, dirs[1+] = real SD cards
+        // dirs[0] = internal storage, dirs[1+] = removable SD cards
         final sdDir = dirs[1];
+        _sdcardAppPath = sdDir.path;
         final root = sdDir.path.split('Android').first;
-        final testDir = Directory(root);
-        if (testDir.existsSync()) {
-          setState(() {
-            _sdcardAvailable = true;
-            _sdcardRootPath = root;
-          });
-          return;
+        _sdcardRootPath = root;
+
+        // Verify write access to SD card app folder
+        final testDir = Directory(sdDir.path);
+        if (!testDir.existsSync()) {
+          testDir.createSync(recursive: true);
         }
+
+        setState(() {
+          _sdcardAvailable = true;
+        });
+        return;
       }
-    } catch (_) {}
+    } catch (e) {
+      debugPrint('SD Card detection error: $e');
+    }
     setState(() {
       _sdcardAvailable = false;
+      _sdcardAppPath = null;
       _sdcardRootPath = null;
       // Fall back to phone if SD was previously selected
       if (_storageLocation == StorageLocation.sdcard) {
@@ -190,6 +208,23 @@ class _CameraScreenState extends State<CameraScreen>
     await _initCamera();
   }
 
+  // ── HDR toggle helper ────────────────────────────────────────────────────────
+  void _cycleHdrMode() {
+    setState(() {
+      switch (_hdrMode) {
+        case HdrMode.auto:
+          _hdrMode = HdrMode.on;
+          break;
+        case HdrMode.on:
+          _hdrMode = HdrMode.off;
+          break;
+        case HdrMode.off:
+          _hdrMode = HdrMode.auto;
+          break;
+      }
+    });
+  }
+
   // ── Flash ─────────────────────────────────────────────────────────────────────
   void _toggleFlash() {
     final modes = [FlashMode.off, FlashMode.auto, FlashMode.always];
@@ -221,26 +256,75 @@ class _CameraScreenState extends State<CameraScreen>
 
   // ── Save directory ────────────────────────────────────────────────────────────
   Future<String> _getSaveDir(bool isVideo) async {
-    Directory? dir;
+    final subFolder = isVideo ? 'Movies/CameraApp' : 'Pictures/CameraApp';
+
     if (Platform.isAndroid) {
-      try {
-        if (_storageLocation == StorageLocation.sdcard && _sdcardRootPath != null) {
-          // Save to microSD card
-          final root = _sdcardRootPath!;
-          dir = Directory(isVideo ? '${root}Movies/CameraApp' : '${root}Pictures/CameraApp');
-        } else {
-          // Save to internal / emulated storage
-          final ext = await getExternalStorageDirectory();
-          if (ext != null) {
-            final root = ext.path.split('Android').first;
-            dir = Directory(isVideo ? '${root}Movies/CameraApp' : '${root}Pictures/CameraApp');
+      // 1. Try MicroSD Card if selected
+      if (_storageLocation == StorageLocation.sdcard) {
+        final candidates = <String>[];
+        if (_sdcardRootPath != null) {
+          candidates.add(path.join(_sdcardRootPath!, subFolder));
+        }
+        if (_sdcardAppPath != null) {
+          candidates.add(path.join(_sdcardAppPath!, isVideo ? 'Movies' : 'Pictures'));
+          candidates.add(_sdcardAppPath!);
+        }
+
+        for (final candidate in candidates) {
+          try {
+            final dir = Directory(candidate);
+            if (!dir.existsSync()) {
+              dir.createSync(recursive: true);
+            }
+            final testFile = File(path.join(dir.path, '.write_test'));
+            testFile.writeAsStringSync('ok');
+            if (testFile.existsSync()) {
+              testFile.deleteSync();
+            }
+            return dir.path;
+          } catch (e) {
+            debugPrint('SD card write candidate $candidate failed: $e');
           }
         }
-      } catch (_) {}
+        debugPrint('Cannot write to SD card, falling back to phone storage');
+      }
+
+      // 2. Internal Phone Storage
+      try {
+        final ext = await getExternalStorageDirectory();
+        if (ext != null) {
+          final root = ext.path.split('Android').first;
+          final publicDir = Directory(path.join(root, subFolder));
+          try {
+            if (!publicDir.existsSync()) {
+              publicDir.createSync(recursive: true);
+            }
+            final testFile = File(path.join(publicDir.path, '.write_test'));
+            testFile.writeAsStringSync('ok');
+            if (testFile.existsSync()) {
+              testFile.deleteSync();
+            }
+            return publicDir.path;
+          } catch (_) {
+            final appExtDir = Directory(path.join(ext.path, isVideo ? 'Movies' : 'Pictures'));
+            if (!appExtDir.existsSync()) {
+              appExtDir.createSync(recursive: true);
+            }
+            return appExtDir.path;
+          }
+        }
+      } catch (e) {
+        debugPrint('Phone storage error: $e');
+      }
     }
-    dir ??= await getApplicationDocumentsDirectory();
-    if (!dir.existsSync()) dir.createSync(recursive: true);
-    return dir.path;
+
+    // 3. Fallback: Application Documents Directory
+    final appDocDir = await getApplicationDocumentsDirectory();
+    final fallbackDir = Directory(path.join(appDocDir.path, subFolder));
+    if (!fallbackDir.existsSync()) {
+      fallbackDir.createSync(recursive: true);
+    }
+    return fallbackDir.path;
   }
 
   // ── Photo capture ─────────────────────────────────────────────────────────────
@@ -288,6 +372,118 @@ class _CameraScreenState extends State<CameraScreen>
     setState(() { _photoCountdown = 0; _isPhotoCountingDown = false; });
   }
 
+  // ── Photo Post-Processing: HDR Low-Light & Timestamp ──────────────────────
+  Future<void> _processCapturedPhoto(String sourcePath, String destPath) async {
+    final applyHdr = _hdrMode == HdrMode.on || _hdrMode == HdrMode.auto;
+    final applyTimestamp = _showTimestamp;
+
+    if (!applyHdr && !applyTimestamp) {
+      await File(sourcePath).copy(destPath);
+      return;
+    }
+
+    try {
+      final bytes = await File(sourcePath).readAsBytes();
+      final codec = await ui.instantiateImageCodec(bytes);
+      final frame = await codec.getNextFrame();
+      final image = frame.image;
+
+      final recorder = ui.PictureRecorder();
+      final canvas = Canvas(recorder);
+
+      if (applyHdr) {
+        // 1. Base image layer
+        canvas.drawImage(image, Offset.zero, Paint());
+
+        // 2. HDR Shadow Recovery layer (Screen blend + brightness offset in dark regions)
+        final hdrShadowPaint = Paint()
+          ..blendMode = BlendMode.screen
+          ..colorFilter = const ColorFilter.matrix(<double>[
+            0.30, 0.0, 0.0, 0.0, 18,
+            0.0, 0.30, 0.0, 0.0, 18,
+            0.0, 0.0, 0.30, 0.0, 18,
+            0.0, 0.0, 0.0, 1.0, 0,
+          ]);
+        canvas.drawImage(image, Offset.zero, hdrShadowPaint);
+
+        // 3. Dynamic contrast & color vibrancy enhancement (SoftLight blend)
+        final hdrVibrancePaint = Paint()
+          ..blendMode = BlendMode.softLight
+          ..colorFilter = const ColorFilter.matrix(<double>[
+            1.10, 0.0, 0.0, 0.0, 0,
+            0.0, 1.10, 0.0, 0.0, 0,
+            0.0, 0.0, 1.10, 0.0, 0,
+            0.0, 0.0, 0.0, 1.0, 0,
+          ]);
+        canvas.drawImage(image, Offset.zero, hdrVibrancePaint);
+      } else {
+        canvas.drawImage(image, Offset.zero, Paint());
+      }
+
+      // 4. Timestamp Watermark (if enabled)
+      if (applyTimestamp) {
+        final now = DateTime.now();
+        final dateStr =
+            '${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year} ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
+
+        final fontSize = (image.width * 0.026).clamp(24.0, 72.0);
+        final padding = fontSize * 0.8;
+
+        final textSpan = TextSpan(
+          text: dateStr,
+          style: TextStyle(
+            color: const Color(0xFFFFD700),
+            fontSize: fontSize,
+            fontWeight: FontWeight.bold,
+            fontFamily: 'monospace',
+            shadows: const [
+              Shadow(color: Colors.black, offset: Offset(2, 2), blurRadius: 4),
+              Shadow(color: Colors.black87, offset: Offset(-1, -1), blurRadius: 3),
+            ],
+          ),
+        );
+
+        final textPainter = TextPainter(
+          text: textSpan,
+          textDirection: TextDirection.ltr,
+        );
+        textPainter.layout();
+
+        final x = image.width - textPainter.width - padding;
+        final y = image.height - textPainter.height - padding;
+
+        final bgRect = RRect.fromRectAndRadius(
+          Rect.fromLTWH(
+            x - padding * 0.4,
+            y - padding * 0.25,
+            textPainter.width + padding * 0.8,
+            textPainter.height + padding * 0.5,
+          ),
+          Radius.circular(padding * 0.35),
+        );
+        canvas.drawRRect(
+          bgRect,
+          Paint()..color = Colors.black.withAlpha(120),
+        );
+
+        textPainter.paint(canvas, Offset(x, y));
+      }
+
+      final picture = recorder.endRecording();
+      final outputImage = await picture.toImage(image.width, image.height);
+      final byteData = await outputImage.toByteData(format: ui.ImageByteFormat.png);
+
+      if (byteData != null) {
+        await File(destPath).writeAsBytes(byteData.buffer.asUint8List());
+      } else {
+        await File(sourcePath).copy(destPath);
+      }
+    } catch (e) {
+      debugPrint('Photo processing error: $e, fallback to copy');
+      await File(sourcePath).copy(destPath);
+    }
+  }
+
   // ── Single photo ──────────────────────────────────────────────────────────────
   Future<void> _takePhoto() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
@@ -296,15 +492,22 @@ class _CameraScreenState extends State<CameraScreen>
       final xFile = await _controller!.takePicture();
       final dir = await _getSaveDir(false);
       final filePath = path.join(dir, 'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg');
-      await File(xFile.path).copy(filePath);
+      
+      await _processCapturedPhoto(xFile.path, filePath);
+
       setState(() { _isTakingPhoto = false; _lastSavedPath = filePath; _lastSavedIsVideo = false; });
       if (mounted) {
-        _showSnackbar('✅ Ảnh đã lưu', Colors.green);
+        final locText = _storageLocation == StorageLocation.sdcard ? 'thẻ nhớ SD' : 'điện thoại';
+        final hdrText = _hdrMode != HdrMode.off ? ' (HDR)' : '';
+        _showSnackbar('✅ Đã lưu ảnh$hdrText vào $locText', Colors.green);
         _openPreview(filePath, false);
       }
-    } on CameraException catch (e) {
+    } catch (e) {
       setState(() => _isTakingPhoto = false);
       debugPrint('Take photo error: $e');
+      if (mounted) {
+        _showSnackbar('❌ Lỗi khi lưu ảnh: $e', Colors.red);
+      }
     }
   }
 
@@ -325,13 +528,15 @@ class _CameraScreenState extends State<CameraScreen>
         setState(() { _isTakingPhoto = true; _burstProgress = i + 1; });
         final xFile = await _controller!.takePicture();
         final filePath = path.join(dir, 'BURST_${DateTime.now().millisecondsSinceEpoch}_${i + 1}.jpg');
-        await File(xFile.path).copy(filePath);
+        
+        await _processCapturedPhoto(xFile.path, filePath);
+
         lastPath = filePath;
         saved++;
         setState(() => _isTakingPhoto = false);
         // short gap between frames (~300 ms)
         if (i < count - 1) await Future.delayed(const Duration(milliseconds: 300));
-      } on CameraException catch (e) {
+      } catch (e) {
         setState(() => _isTakingPhoto = false);
         debugPrint('Burst frame ${i + 1} error: $e');
       }
@@ -345,8 +550,14 @@ class _CameraScreenState extends State<CameraScreen>
         _lastSavedIsVideo = false;
       }
     });
-    if (mounted && saved > 0) {
-      _showSnackbar('✅ Đã lưu $saved/$count ảnh liên tiếp', Colors.green);
+    if (mounted) {
+      if (saved > 0) {
+        final locText = _storageLocation == StorageLocation.sdcard ? 'thẻ nhớ SD' : 'điện thoại';
+        final hdrText = _hdrMode != HdrMode.off ? ' (HDR)' : '';
+        _showSnackbar('✅ Đã lưu $saved/$count ảnh$hdrText vào $locText', Colors.green);
+      } else {
+        _showSnackbar('❌ Không thể lưu ảnh chụp liên tiếp', Colors.red);
+      }
     }
   }
 
@@ -387,13 +598,17 @@ class _CameraScreenState extends State<CameraScreen>
       await File(xFile.path).copy(filePath);
       setState(() { _isRecording = false; _recordingElapsed = 0; _lastSavedPath = filePath; _lastSavedIsVideo = true; });
       if (mounted) {
-        _showSnackbar('✅ Video đã lưu', Colors.green);
+        final locText = _storageLocation == StorageLocation.sdcard ? 'thẻ nhớ SD' : 'điện thoại';
+        _showSnackbar('✅ Đã lưu video vào $locText', Colors.green);
         _openPreview(filePath, true);
       }
-    } on CameraException catch (e) {
+    } catch (e) {
       WakelockPlus.disable();
       setState(() => _isRecording = false);
       debugPrint('Stop recording error: $e');
+      if (mounted) {
+        _showSnackbar('❌ Lỗi khi lưu video: $e', Colors.red);
+      }
     }
   }
 
@@ -443,10 +658,66 @@ class _CameraScreenState extends State<CameraScreen>
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
         children: [
-          IconButton(
-            icon: Icon(_flashIcon, color: Colors.white),
-            onPressed: _mode == CameraMode.photo ? _toggleFlash : null,
-            tooltip: 'Flash',
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                icon: Icon(_flashIcon, color: Colors.white),
+                onPressed: _mode == CameraMode.photo ? _toggleFlash : null,
+                tooltip: 'Flash',
+              ),
+              if (_mode == CameraMode.photo) ...[
+                const SizedBox(width: 2),
+                GestureDetector(
+                  onTap: _cycleHdrMode,
+                  child: Container(
+                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    decoration: BoxDecoration(
+                      color: _hdrMode != HdrMode.off
+                          ? const Color(0xFFFFD700).withAlpha(35)
+                          : Colors.transparent,
+                      borderRadius: BorderRadius.circular(12),
+                      border: Border.all(
+                        color: _hdrMode != HdrMode.off
+                            ? const Color(0xFFFFD700)
+                            : Colors.white24,
+                      ),
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          _hdrMode == HdrMode.on
+                              ? Icons.hdr_on
+                              : _hdrMode == HdrMode.auto
+                                  ? Icons.hdr_auto
+                                  : Icons.hdr_off,
+                          size: 15,
+                          color: _hdrMode != HdrMode.off
+                              ? const Color(0xFFFFD700)
+                              : Colors.white70,
+                        ),
+                        const SizedBox(width: 3),
+                        Text(
+                          _hdrMode == HdrMode.on
+                              ? 'HDR'
+                              : _hdrMode == HdrMode.auto
+                                  ? 'HDR A'
+                                  : 'HDR TẮT',
+                          style: TextStyle(
+                            color: _hdrMode != HdrMode.off
+                                ? const Color(0xFFFFD700)
+                                : Colors.white70,
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
+            ],
           ),
           if (_isRecording)
             Row(children: [
@@ -542,6 +813,9 @@ class _CameraScreenState extends State<CameraScreen>
         child: _buildCameraPreview(),
       ),
 
+      // Lưới 9 ô (rule of thirds)
+      if (_showGrid) _buildGridOverlay(),
+
       // Flash blink khi chụp
       if (_isTakingPhoto)
         Positioned.fill(child: Container(color: Colors.white.withAlpha(200))),
@@ -575,8 +849,9 @@ class _CameraScreenState extends State<CameraScreen>
             child: Container(
               padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
               decoration: BoxDecoration(
-                color: Colors.black.withAlpha(180),
+                color: Colors.black.withAlpha(200),
                 borderRadius: BorderRadius.circular(30),
+                border: Border.all(color: const Color(0xFFFFD700), width: 1),
               ),
               child: Row(mainAxisSize: MainAxisSize.min, children: [
                 const Icon(Icons.burst_mode, color: Color(0xFFFFD700), size: 20),
@@ -600,8 +875,11 @@ class _CameraScreenState extends State<CameraScreen>
           child: Container(
             padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
             decoration: BoxDecoration(
-              color: const Color(0xFFFFD700).withAlpha(220),
+              color: const Color(0xFFFFD700),
               borderRadius: BorderRadius.circular(12),
+              boxShadow: const [
+                BoxShadow(color: Colors.black45, blurRadius: 4, offset: Offset(0, 2)),
+              ],
             ),
             child: Row(mainAxisSize: MainAxisSize.min, children: [
               const Icon(Icons.burst_mode, size: 13, color: Colors.black87),
@@ -616,28 +894,49 @@ class _CameraScreenState extends State<CameraScreen>
           ),
         ),
 
-      // Settings panel
-      if (_showSettings) _buildSettingsPanel(),
-
-      // Lưới 9 ô (rule of thirds)
-      if (_showGrid) _buildGridOverlay(),
-
-      // Badge chất lượng
+      // Badges: Quality + HDR (top-right)
       Positioned(
         top: 10, right: 10,
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-          decoration: BoxDecoration(
-            color: Colors.black.withAlpha(140),
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Text(
-            _resolution == ResolutionPreset.veryHigh ? 'Full HD' : 'HD',
-            style: const TextStyle(
-              color: Color(0xFFFFD700), fontSize: 11, fontWeight: FontWeight.bold),
-          ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (_mode == CameraMode.photo && _hdrMode != HdrMode.off) ...[
+              Container(
+                margin: const EdgeInsets.only(right: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFD700).withAlpha(220),
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black38, blurRadius: 4, offset: Offset(0, 1)),
+                  ],
+                ),
+                child: Text(
+                  _hdrMode == HdrMode.on ? 'HDR' : 'HDR AUTO',
+                  style: const TextStyle(
+                    color: Colors.black, fontSize: 10, fontWeight: FontWeight.w800),
+                ),
+              ),
+            ],
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.black.withAlpha(160),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: const Color(0xFFFFD700).withAlpha(120), width: 0.8),
+              ),
+              child: Text(
+                _resolution == ResolutionPreset.veryHigh ? 'Full HD' : 'HD',
+                style: const TextStyle(
+                  color: Color(0xFFFFD700), fontSize: 11, fontWeight: FontWeight.bold),
+              ),
+            ),
+          ],
         ),
       ),
+
+      // Settings panel
+      if (_showSettings) _buildSettingsPanel(),
     ]);
   }
 
@@ -646,52 +945,99 @@ class _CameraScreenState extends State<CameraScreen>
     return Positioned(
       bottom: 0, left: 0, right: 0,
       child: Container(
-        padding: const EdgeInsets.fromLTRB(20, 12, 20, 24),
-        decoration: BoxDecoration(
-          color: Colors.black.withAlpha(225),
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(20)),
+        constraints: BoxConstraints(
+          maxHeight: MediaQuery.of(context).size.height * 0.65,
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Center(child: Container(
-              width: 40, height: 4,
-              margin: const EdgeInsets.only(bottom: 16),
-              decoration: BoxDecoration(
-                color: Colors.white30,
-                borderRadius: BorderRadius.circular(2),
-              ),
-            )),
-            QualitySelector(selected: _resolution, onChanged: _changeQuality),
-            const SizedBox(height: 20),
-            if (_mode == CameraMode.photo) ...[
-              TimerSelector(
-                label: 'HẸN GIỜ CHỤP ẢNH',
-                options: _photoTimerOptions,
-                selected: _selectedPhotoTimer,
-                onChanged: (v) => setState(() => _selectedPhotoTimer = v),
-              ),
-            ] else ...[
-              TimerSelector(
-                label: 'THỜI LƯỢNG QUAY TỰ ĐỘNG',
-                options: _videoDurationOptions,
-                selected: _selectedVideoDuration,
-                onChanged: (v) { if (!_isRecording) setState(() => _selectedVideoDuration = v); },
-              ),
-            ],
-            const SizedBox(height: 20),
-            if (_mode == CameraMode.photo) ...[
-              _buildBurstSelector(),
-              const SizedBox(height: 20),
-            ],
-            StorageSelector(
-              selected: _storageLocation,
-              sdcardAvailable: _sdcardAvailable,
-              onChanged: (loc) => setState(() => _storageLocation = loc),
+        padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
+        decoration: BoxDecoration(
+          color: const Color(0xFF18181A),
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          border: Border.all(color: const Color(0xFF38383A), width: 1),
+          boxShadow: const [
+            BoxShadow(
+              color: Colors.black87,
+              blurRadius: 20,
+              spreadRadius: 5,
+              offset: Offset(0, -4),
             ),
-            const SizedBox(height: 8),
           ],
+        ),
+        child: SingleChildScrollView(
+          physics: const BouncingScrollPhysics(),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Header bar with title and close button
+              Row(
+                mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                children: [
+                  const Row(
+                    children: [
+                      Icon(Icons.tune, color: Color(0xFFFFD700), size: 18),
+                      SizedBox(width: 8),
+                      Text(
+                        'CÀI ĐẶT CAMERA',
+                        style: TextStyle(
+                          color: Colors.white,
+                          fontSize: 15,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 0.8,
+                        ),
+                      ),
+                    ],
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.close, color: Colors.white70, size: 20),
+                    padding: EdgeInsets.zero,
+                    constraints: const BoxConstraints(),
+                    onPressed: () => setState(() => _showSettings = false),
+                    tooltip: 'Đóng cài đặt',
+                  ),
+                ],
+              ),
+              const Divider(color: Color(0xFF333336), height: 22, thickness: 1),
+
+              QualitySelector(selected: _resolution, onChanged: _changeQuality),
+              const SizedBox(height: 18),
+              if (_mode == CameraMode.photo) ...[
+                HdrSelector(
+                  selected: _hdrMode,
+                  onChanged: (v) => setState(() => _hdrMode = v),
+                ),
+                const SizedBox(height: 18),
+                TimerSelector(
+                  label: 'HẸN GIỜ CHỤP ẢNH',
+                  icon: Icons.timer_outlined,
+                  options: _photoTimerOptions,
+                  selected: _selectedPhotoTimer,
+                  onChanged: (v) => setState(() => _selectedPhotoTimer = v),
+                ),
+                const SizedBox(height: 18),
+                _buildBurstSelector(),
+                const SizedBox(height: 18),
+                TimestampSelector(
+                  enabled: _showTimestamp,
+                  onChanged: (v) => setState(() => _showTimestamp = v),
+                ),
+              ] else ...[
+                TimerSelector(
+                  label: 'THỜI LƯỢNG QUAY TỰ ĐỘNG',
+                  icon: Icons.videocam_outlined,
+                  options: _videoDurationOptions,
+                  selected: _selectedVideoDuration,
+                  onChanged: (v) { if (!_isRecording) setState(() => _selectedVideoDuration = v); },
+                ),
+              ],
+              const SizedBox(height: 18),
+              StorageSelector(
+                selected: _storageLocation,
+                sdcardAvailable: _sdcardAvailable,
+                onChanged: (loc) => setState(() => _storageLocation = loc),
+              ),
+              const SizedBox(height: 8),
+            ],
+          ),
         ),
       ),
     );
@@ -777,16 +1123,25 @@ class _CameraScreenState extends State<CameraScreen>
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        const Text(
-          'CHỤP LIÊN TIẾP',
-          style: TextStyle(
-            color: Colors.white70, fontSize: 12,
-            fontWeight: FontWeight.w600, letterSpacing: 0.5,
-          ),
+        const Row(
+          children: [
+            Icon(Icons.burst_mode, size: 16, color: Color(0xFFFFD700)),
+            SizedBox(width: 6),
+            Text(
+              'CHỤP LIÊN TIẾP',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ],
         ),
         const SizedBox(height: 8),
         SingleChildScrollView(
           scrollDirection: Axis.horizontal,
+          physics: const BouncingScrollPhysics(),
           child: Row(
             children: _burstOptions.map((count) {
               final isSelected = _burstCount == count;
@@ -799,26 +1154,43 @@ class _CameraScreenState extends State<CameraScreen>
                     duration: const Duration(milliseconds: 180),
                     padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
                     decoration: BoxDecoration(
-                      color: isSelected ? const Color(0xFFFFD700) : Colors.white.withAlpha(25),
+                      color: isSelected ? const Color(0xFFFFD700) : const Color(0xFF2C2C2E),
                       borderRadius: BorderRadius.circular(20),
                       border: Border.all(
-                        color: isSelected ? const Color(0xFFFFD700) : Colors.white24),
-                    ),
-                    child: Row(mainAxisSize: MainAxisSize.min, children: [
-                      if (count > 0) ...[
-                        const Icon(Icons.burst_mode, size: 14,
-                          color: Colors.black54),
-                        const SizedBox(width: 4),
-                      ],
-                      Text(
-                        label,
-                        style: TextStyle(
-                          color: isSelected ? Colors.black : Colors.white,
-                          fontSize: 13,
-                          fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
-                        ),
+                        color: isSelected ? const Color(0xFFFFD700) : const Color(0xFF48484A),
+                        width: 1.2,
                       ),
-                    ]),
+                      boxShadow: isSelected
+                          ? [
+                              BoxShadow(
+                                color: const Color(0xFFFFD700).withAlpha(80),
+                                blurRadius: 8,
+                                offset: const Offset(0, 2),
+                              ),
+                            ]
+                          : null,
+                    ),
+                    child: Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        if (count > 0) ...[
+                          Icon(
+                            Icons.burst_mode,
+                            size: 14,
+                            color: isSelected ? Colors.black87 : Colors.white70,
+                          ),
+                          const SizedBox(width: 4),
+                        ],
+                        Text(
+                          label,
+                          style: TextStyle(
+                            color: isSelected ? Colors.black : Colors.white,
+                            fontSize: 13,
+                            fontWeight: isSelected ? FontWeight.bold : FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
                   ),
                 ),
               );
