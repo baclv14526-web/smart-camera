@@ -60,6 +60,7 @@ class _CameraScreenState extends State<CameraScreen>
   // ── UI state ─────────────────────────────────────────────────────────────────
   bool _isInitializing = true;
   bool _showSettings = false;
+  bool _showGrid = false;
   bool _isTakingPhoto = false;
   String? _lastSavedPath;
   bool _lastSavedIsVideo = false;
@@ -465,15 +466,60 @@ class _CameraScreenState extends State<CameraScreen>
           else
             const Text('Camera',
                 style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-          IconButton(
-            icon: Icon(
-              Icons.tune,
-              color: _showSettings ? const Color(0xFFFFD700) : Colors.white,
+          Row(mainAxisSize: MainAxisSize.min, children: [
+            // Lưới 9 ô
+            AnimatedSwitcher(
+              duration: const Duration(milliseconds: 200),
+              child: IconButton(
+                key: ValueKey(_showGrid),
+                icon: Icon(
+                  _showGrid ? Icons.grid_on : Icons.grid_off,
+                  color: _showGrid ? const Color(0xFFFFD700) : Colors.white,
+                ),
+                onPressed: () => setState(() => _showGrid = !_showGrid),
+                tooltip: _showGrid ? 'Tắt lưới' : 'Bật lưới',
+              ),
             ),
-            onPressed: () => setState(() => _showSettings = !_showSettings),
-            tooltip: 'Cài đặt',
-          ),
+            IconButton(
+              icon: Icon(
+                Icons.tune,
+                color: _showSettings ? const Color(0xFFFFD700) : Colors.white,
+              ),
+              onPressed: () => setState(() => _showSettings = !_showSettings),
+              tooltip: 'Cài đặt',
+            ),
+          ]),
         ],
+      ),
+    );
+  }
+
+  // ── Camera preview (aspect-ratio correct) ────────────────────────────────────
+  /// Fills the available space while preserving the sensor's native aspect ratio.
+  /// Uses FittedBox(cover) so the image is cropped at the edges rather than
+  /// stretched — identical to how the stock Oppo camera renders the viewfinder.
+  Widget _buildCameraPreview() {
+    final previewSize = _controller!.value.previewSize;
+    if (previewSize == null) {
+      return CameraPreview(_controller!);
+    }
+
+    // previewSize.width is always the longer dimension regardless of orientation.
+    // On a portrait device the sensor "width" maps to screen height, so we swap.
+    final double sensorW = previewSize.height; // landscape width  → portrait height-axis
+    final double sensorH = previewSize.width;  // landscape height → portrait width-axis
+
+    return OverflowBox(
+      maxWidth: double.infinity,
+      maxHeight: double.infinity,
+      alignment: Alignment.center,
+      child: FittedBox(
+        fit: BoxFit.cover,
+        child: SizedBox(
+          width: sensorW,
+          height: sensorH,
+          child: CameraPreview(_controller!),
+        ),
       ),
     );
   }
@@ -491,7 +537,10 @@ class _CameraScreenState extends State<CameraScreen>
       );
     }
     return Stack(children: [
-      Positioned.fill(child: CameraPreview(_controller!)),
+      // ── Camera preview: fill screen, preserve sensor aspect ratio (no stretch) ──
+      Positioned.fill(
+        child: _buildCameraPreview(),
+      ),
 
       // Flash blink khi chụp
       if (_isTakingPhoto)
@@ -569,6 +618,9 @@ class _CameraScreenState extends State<CameraScreen>
 
       // Settings panel
       if (_showSettings) _buildSettingsPanel(),
+
+      // Lưới 9 ô (rule of thirds)
+      if (_showGrid) _buildGridOverlay(),
 
       // Badge chất lượng
       Positioned(
@@ -828,6 +880,61 @@ class _CameraScreenState extends State<CameraScreen>
       );
     }
   }
+
+  // ── Grid overlay ────────────────────────────────────────────────────────────
+  /// Rule-of-thirds 3×3 grid with intersection highlight dots.
+  Widget _buildGridOverlay() {
+    return Positioned.fill(
+      child: IgnorePointer(
+        child: CustomPaint(
+          painter: _GridPainter(),
+        ),
+      ),
+    );
+  }
+}
+
+class _GridPainter extends CustomPainter {
+  @override
+  void paint(Canvas canvas, Size size) {
+    final linePaint = Paint()
+      ..color = Colors.white.withAlpha(70)
+      ..strokeWidth = 0.8
+      ..style = PaintingStyle.stroke;
+
+    final dotPaint = Paint()
+      ..color = const Color(0xFFFFD700).withAlpha(180)
+      ..style = PaintingStyle.fill;
+
+    final w = size.width;
+    final h = size.height;
+
+    // 2 vertical lines at 1/3 and 2/3
+    for (int i = 1; i <= 2; i++) {
+      final x = w * i / 3;
+      canvas.drawLine(Offset(x, 0), Offset(x, h), linePaint);
+    }
+
+    // 2 horizontal lines at 1/3 and 2/3
+    for (int i = 1; i <= 2; i++) {
+      final y = h * i / 3;
+      canvas.drawLine(Offset(0, y), Offset(w, y), linePaint);
+    }
+
+    // 4 intersection dots (power points)
+    for (int col = 1; col <= 2; col++) {
+      for (int row = 1; row <= 2; row++) {
+        canvas.drawCircle(
+          Offset(w * col / 3, h * row / 3),
+          3.5,
+          dotPaint,
+        );
+      }
+    }
+  }
+
+  @override
+  bool shouldRepaint(_GridPainter oldDelegate) => false;
 }
 
 // ── Mode button ────────────────────────────────────────────────────────────────
