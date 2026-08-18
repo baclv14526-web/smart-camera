@@ -8,6 +8,7 @@ import 'package:permission_handler/permission_handler.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import '../widgets/timer_selector.dart';
 import '../widgets/quality_selector.dart';
+import '../widgets/storage_selector.dart';
 import 'preview_screen.dart';
 
 enum CameraMode { photo, video }
@@ -56,6 +57,11 @@ class _CameraScreenState extends State<CameraScreen>
   String? _lastSavedPath;
   bool _lastSavedIsVideo = false;
 
+  // ── Storage location ──────────────────────────────────────────────────────────
+  StorageLocation _storageLocation = StorageLocation.phone;
+  bool _sdcardAvailable = false;
+  String? _sdcardRootPath;
+
   // ── Flash ────────────────────────────────────────────────────────────────────
   FlashMode _flashMode = FlashMode.off;
 
@@ -64,6 +70,7 @@ class _CameraScreenState extends State<CameraScreen>
     super.initState();
     WidgetsBinding.instance.addObserver(this);
     _requestPermissions();
+    _detectSdCard();
   }
 
   @override
@@ -85,6 +92,35 @@ class _CameraScreenState extends State<CameraScreen>
     } else if (state == AppLifecycleState.resumed) {
       _initCamera();
     }
+  }
+
+  // ── SD Card detection ────────────────────────────────────────────────────────
+  Future<void> _detectSdCard() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final dirs = await getExternalStorageDirectories();
+      if (dirs != null && dirs.length > 1) {
+        // dirs[0] = internal emulated storage, dirs[1+] = real SD cards
+        final sdDir = dirs[1];
+        final root = sdDir.path.split('Android').first;
+        final testDir = Directory(root);
+        if (testDir.existsSync()) {
+          setState(() {
+            _sdcardAvailable = true;
+            _sdcardRootPath = root;
+          });
+          return;
+        }
+      }
+    } catch (_) {}
+    setState(() {
+      _sdcardAvailable = false;
+      _sdcardRootPath = null;
+      // Fall back to phone if SD was previously selected
+      if (_storageLocation == StorageLocation.sdcard) {
+        _storageLocation = StorageLocation.phone;
+      }
+    });
   }
 
   // ── Permissions ──────────────────────────────────────────────────────────────
@@ -180,10 +216,17 @@ class _CameraScreenState extends State<CameraScreen>
     Directory? dir;
     if (Platform.isAndroid) {
       try {
-        final ext = await getExternalStorageDirectory();
-        if (ext != null) {
-          final root = ext.path.split('Android').first;
+        if (_storageLocation == StorageLocation.sdcard && _sdcardRootPath != null) {
+          // Save to microSD card
+          final root = _sdcardRootPath!;
           dir = Directory(isVideo ? '${root}Movies/CameraApp' : '${root}Pictures/CameraApp');
+        } else {
+          // Save to internal / emulated storage
+          final ext = await getExternalStorageDirectory();
+          if (ext != null) {
+            final root = ext.path.split('Android').first;
+            dir = Directory(isVideo ? '${root}Movies/CameraApp' : '${root}Pictures/CameraApp');
+          }
         }
       } catch (_) {}
     }
@@ -477,6 +520,12 @@ class _CameraScreenState extends State<CameraScreen>
                 onChanged: (v) { if (!_isRecording) setState(() => _selectedVideoDuration = v); },
               ),
             ],
+            const SizedBox(height: 20),
+            StorageSelector(
+              selected: _storageLocation,
+              sdcardAvailable: _sdcardAvailable,
+              onChanged: (loc) => setState(() => _storageLocation = loc),
+            ),
             const SizedBox(height: 8),
           ],
         ),
