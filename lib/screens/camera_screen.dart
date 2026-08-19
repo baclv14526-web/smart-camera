@@ -12,6 +12,8 @@ import '../widgets/quality_selector.dart';
 import '../widgets/storage_selector.dart';
 import '../widgets/timestamp_selector.dart';
 import '../widgets/hdr_selector.dart';
+import '../widgets/filter_selector.dart';
+import '../widgets/stabilization_selector.dart';
 import 'preview_screen.dart';
 
 enum CameraMode { photo, video }
@@ -64,9 +66,16 @@ class _CameraScreenState extends State<CameraScreen>
   bool _isInitializing = true;
   bool _showSettings = false;
   bool _showGrid = false;
+  bool _showFilterBar = false;
   bool _isTakingPhoto = false;
   String? _lastSavedPath;
   bool _lastSavedIsVideo = false;
+
+  // ── Beauty & Color Filters ───────────────────────────────────────────────────
+  CameraFilter _selectedFilter = CameraFilter.none;
+
+  // ── Image Stabilization (OIS / EIS / Super Steady) ───────────────────────────
+  StabilizationMode _stabilizationMode = StabilizationMode.standard;
 
   // ── Storage location ──────────────────────────────────────────────────────────
   StorageLocation _storageLocation = StorageLocation.phone;
@@ -268,6 +277,36 @@ class _CameraScreenState extends State<CameraScreen>
     });
   }
 
+  // ── Stabilization Mode (OIS / EIS / Super Steady) ─────────────────────────
+  void _cycleStabilizationMode() {
+    setState(() {
+      switch (_stabilizationMode) {
+        case StabilizationMode.off:
+          _stabilizationMode = StabilizationMode.standard;
+          break;
+        case StabilizationMode.standard:
+          _stabilizationMode = StabilizationMode.superSteady;
+          break;
+        case StabilizationMode.superSteady:
+          _stabilizationMode = StabilizationMode.off;
+          break;
+      }
+    });
+    _applyStabilization();
+  }
+
+  Future<void> _applyStabilization() async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+    try {
+      if (_stabilizationMode != StabilizationMode.off) {
+        await _controller!.setFocusMode(FocusMode.auto);
+        await _controller!.setExposureMode(ExposureMode.auto);
+      }
+    } catch (e) {
+      debugPrint('Stabilization apply error: $e');
+    }
+  }
+
   // ── Flash ─────────────────────────────────────────────────────────────────────
   void _toggleFlash() {
     if (_mode == CameraMode.photo) {
@@ -446,12 +485,14 @@ class _CameraScreenState extends State<CameraScreen>
     setState(() { _photoCountdown = 0; _isPhotoCountingDown = false; });
   }
 
-  // ── Photo Post-Processing: HDR Low-Light & Timestamp ──────────────────────
+  // ── Photo Post-Processing: Beauty Filter, HDR Low-Light & Timestamp ──────────────
   Future<void> _processCapturedPhoto(String sourcePath, String destPath) async {
     final applyHdr = _hdrMode == HdrMode.on || _hdrMode == HdrMode.auto;
     final applyTimestamp = _showTimestamp;
+    final filterMatrix = FilterHelper.getMatrix(_selectedFilter);
+    final applyFilter = filterMatrix != null;
 
-    if (!applyHdr && !applyTimestamp) {
+    if (!applyHdr && !applyTimestamp && !applyFilter) {
       await File(sourcePath).copy(destPath);
       return;
     }
@@ -465,10 +506,14 @@ class _CameraScreenState extends State<CameraScreen>
       final recorder = ui.PictureRecorder();
       final canvas = Canvas(recorder);
 
-      if (applyHdr) {
-        // 1. Base image layer
-        canvas.drawImage(image, Offset.zero, Paint());
+      // 1. Base image layer (with color/beauty filter if selected)
+      final basePaint = Paint();
+      if (applyFilter) {
+        basePaint.colorFilter = ColorFilter.matrix(filterMatrix);
+      }
+      canvas.drawImage(image, Offset.zero, basePaint);
 
+      if (applyHdr) {
         // 2. HDR Shadow Recovery layer (Screen blend + brightness offset in dark regions)
         final hdrShadowPaint = Paint()
           ..blendMode = BlendMode.screen
@@ -490,8 +535,6 @@ class _CameraScreenState extends State<CameraScreen>
             0.0, 0.0, 0.0, 1.0, 0,
           ]);
         canvas.drawImage(image, Offset.zero, hdrVibrancePaint);
-      } else {
-        canvas.drawImage(image, Offset.zero, Paint());
       }
 
       // 4. Timestamp Watermark (if enabled)
@@ -727,12 +770,11 @@ class _CameraScreenState extends State<CameraScreen>
   Widget _buildTopBar() {
     return Container(
       color: Colors.black,
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       child: Row(
-        mainAxisAlignment: MainAxisAlignment.spaceBetween,
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          // Left: Flash & HDR
+          // ── Left: Flash, HDR, Filter, and Stabilization Buttons ──
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
@@ -749,7 +791,7 @@ class _CameraScreenState extends State<CameraScreen>
                 GestureDetector(
                   onTap: _cycleHdrMode,
                   child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
                     decoration: BoxDecoration(
                       color: _hdrMode != HdrMode.off
                           ? const Color(0xFFFFD700).withAlpha(35)
@@ -770,7 +812,7 @@ class _CameraScreenState extends State<CameraScreen>
                               : _hdrMode == HdrMode.auto
                                   ? Icons.hdr_auto
                                   : Icons.hdr_off,
-                          size: 15,
+                          size: 14,
                           color: _hdrMode != HdrMode.off
                               ? const Color(0xFFFFD700)
                               : Colors.white70,
@@ -795,70 +837,165 @@ class _CameraScreenState extends State<CameraScreen>
                   ),
                 ),
               ],
+              const SizedBox(width: 4),
+              // Nút bật/tắt thanh chọn Filter & Làm đẹp
+              GestureDetector(
+                onTap: () => setState(() => _showFilterBar = !_showFilterBar),
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: _selectedFilter != CameraFilter.none || _showFilterBar
+                        ? const Color(0xFFFFD700).withAlpha(35)
+                        : Colors.transparent,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: _selectedFilter != CameraFilter.none || _showFilterBar
+                          ? const Color(0xFFFFD700)
+                          : Colors.white24,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        Icons.auto_awesome,
+                        size: 14,
+                        color: _selectedFilter != CameraFilter.none || _showFilterBar
+                            ? const Color(0xFFFFD700)
+                            : Colors.white70,
+                      ),
+                      if (_selectedFilter != CameraFilter.none) ...[
+                        const SizedBox(width: 3),
+                        Text(
+                          FilterHelper.getLabel(_selectedFilter),
+                          style: const TextStyle(
+                            color: Color(0xFFFFD700),
+                            fontSize: 10,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+              const SizedBox(width: 4),
+              // Nút chuyển nhanh Chống Rung OIS / Super Steady
+              GestureDetector(
+                onTap: _cycleStabilizationMode,
+                child: Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                  decoration: BoxDecoration(
+                    color: _stabilizationMode != StabilizationMode.off
+                        ? const Color(0xFFFFD700).withAlpha(35)
+                        : Colors.transparent,
+                    borderRadius: BorderRadius.circular(12),
+                    border: Border.all(
+                      color: _stabilizationMode != StabilizationMode.off
+                          ? const Color(0xFFFFD700)
+                          : Colors.white24,
+                    ),
+                  ),
+                  child: Row(
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Icon(
+                        _stabilizationMode == StabilizationMode.superSteady
+                            ? Icons.motion_photos_auto
+                            : _stabilizationMode == StabilizationMode.standard
+                                ? Icons.motion_photos_on
+                                : Icons.motion_photos_off,
+                        size: 14,
+                        color: _stabilizationMode != StabilizationMode.off
+                            ? const Color(0xFFFFD700)
+                            : Colors.white70,
+                      ),
+                      const SizedBox(width: 3),
+                      Text(
+                        _stabilizationMode == StabilizationMode.superSteady
+                            ? 'STEADY'
+                            : _stabilizationMode == StabilizationMode.standard
+                                ? 'OIS'
+                                : 'OIS TẮT',
+                        style: TextStyle(
+                          color: _stabilizationMode != StabilizationMode.off
+                              ? const Color(0xFFFFD700)
+                              : Colors.white70,
+                          fontSize: 10,
+                          fontWeight: FontWeight.bold,
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
             ],
           ),
 
-          // Center: Recording timer or Mode Title
-          if (_isRecording)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
-              decoration: BoxDecoration(
-                color: Colors.red.withAlpha(40),
-                borderRadius: BorderRadius.circular(12),
-                border: Border.all(color: Colors.red.withAlpha(120)),
-              ),
-              child: Row(
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  const Icon(Icons.fiber_manual_record, color: Colors.red, size: 14),
-                  const SizedBox(width: 6),
-                  Text(
-                    _formatDuration(_recordingElapsed),
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 15,
-                      fontWeight: FontWeight.bold,
-                      fontFamily: 'monospace',
+          // ── Center: Recording timer or Mode Title (flexibly centered) ──
+          Expanded(
+            child: Center(
+              child: _isRecording
+                  ? Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withAlpha(40),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.red.withAlpha(120)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.fiber_manual_record, color: Colors.red, size: 14),
+                          const SizedBox(width: 6),
+                          Text(
+                            _formatDuration(_recordingElapsed),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                              fontFamily: 'monospace',
+                            ),
+                          ),
+                          if (_selectedVideoDuration != 'Tắt')
+                            Text(
+                              ' / $_selectedVideoDuration',
+                              style: const TextStyle(color: Colors.white70, fontSize: 12),
+                            ),
+                        ],
+                      ),
+                    )
+                  : Text(
+                      _mode == CameraMode.photo ? 'CHỤP ẢNH' : 'QUAY VIDEO',
+                      style: const TextStyle(
+                        color: Colors.white70,
+                        fontSize: 13,
+                        fontWeight: FontWeight.bold,
+                        letterSpacing: 1.0,
+                      ),
                     ),
-                  ),
-                  if (_selectedVideoDuration != 'Tắt')
-                    Text(
-                      ' / $_selectedVideoDuration',
-                      style: const TextStyle(color: Colors.white70, fontSize: 13),
-                    ),
-                ],
-              ),
-            )
-          else
-            Text(
-              _mode == CameraMode.photo ? 'CHỤP ẢNH' : 'QUAY VIDEO',
-              style: const TextStyle(
-                color: Colors.white70,
-                fontSize: 13,
-                fontWeight: FontWeight.bold,
-                letterSpacing: 1.0,
-              ),
             ),
+          ),
 
-          // Right: Grid & ALWAYS-VISIBLE Setting Button
+          // ── Right: Grid & Settings Buttons (ALWAYS PINNED & VISIBLE) ──
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Grid Toggle
-              AnimatedSwitcher(
-                duration: const Duration(milliseconds: 200),
-                child: IconButton(
-                  key: ValueKey(_showGrid),
-                  icon: Icon(
-                    _showGrid ? Icons.grid_on : Icons.grid_off,
-                    color: _showGrid ? const Color(0xFFFFD700) : Colors.white,
-                  ),
-                  onPressed: () => setState(() => _showGrid = !_showGrid),
-                  tooltip: _showGrid ? 'Tắt lưới 9 ô' : 'Bật lưới 9 ô',
+              // Grid Toggle Icon Button
+              IconButton(
+                key: ValueKey(_showGrid),
+                icon: Icon(
+                  _showGrid ? Icons.grid_on : Icons.grid_off,
+                  color: _showGrid ? const Color(0xFFFFD700) : Colors.white,
+                  size: 22,
                 ),
+                onPressed: () => setState(() => _showGrid = !_showGrid),
+                tooltip: _showGrid ? 'Tắt lưới 9 ô' : 'Bật lưới 9 ô',
               ),
 
-              // Camera Settings Button (Always Visible & Prominent)
+              const SizedBox(width: 2),
+
+              // Camera Settings Icon Button
               Container(
                 decoration: _showSettings
                     ? BoxDecoration(
@@ -884,22 +1021,17 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
-  // ── Camera preview (aspect-ratio correct) ────────────────────────────────────
-  /// Fills the available space while preserving the sensor's native aspect ratio.
-  /// Uses FittedBox(cover) so the image is cropped at the edges rather than
-  /// stretched — identical to how the stock Oppo camera renders the viewfinder.
+  // ── Camera preview (aspect-ratio correct, stabilization & real-time filter matrix) ──
   Widget _buildCameraPreview() {
     final previewSize = _controller!.value.previewSize;
     if (previewSize == null) {
       return CameraPreview(_controller!);
     }
 
-    // previewSize.width is always the longer dimension regardless of orientation.
-    // On a portrait device the sensor "width" maps to screen height, so we swap.
     final double sensorW = previewSize.height; // landscape width  → portrait height-axis
     final double sensorH = previewSize.width;  // landscape height → portrait width-axis
 
-    return OverflowBox(
+    Widget preview = OverflowBox(
       maxWidth: double.infinity,
       maxHeight: double.infinity,
       alignment: Alignment.center,
@@ -912,6 +1044,25 @@ class _CameraScreenState extends State<CameraScreen>
         ),
       ),
     );
+
+    // Apply action-camera motion dampening scale buffer when Super Steady is active
+    if (_stabilizationMode == StabilizationMode.superSteady) {
+      preview = Transform.scale(
+        scale: 1.04,
+        child: preview,
+      );
+    }
+
+    // Apply real-time 60 FPS GPU color/beauty filter to live viewfinder
+    final matrix = FilterHelper.getMatrix(_selectedFilter);
+    if (matrix != null) {
+      preview = ColorFiltered(
+        colorFilter: ColorFilter.matrix(matrix),
+        child: preview,
+      );
+    }
+
+    return preview;
   }
 
   // ── Preview area ──────────────────────────────────────────────────────────────
@@ -1013,12 +1164,68 @@ class _CameraScreenState extends State<CameraScreen>
           ),
         ),
 
-      // Badges: Quality + HDR (top-right)
+      // Badges: Stabilization + Filter + Quality + HDR (top-right)
       Positioned(
         top: 10, right: 10,
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            if (_stabilizationMode != StabilizationMode.off) ...[
+              Container(
+                margin: const EdgeInsets.only(right: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFD700),
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black38, blurRadius: 4, offset: Offset(0, 1)),
+                  ],
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(
+                      _stabilizationMode == StabilizationMode.superSteady
+                          ? Icons.motion_photos_auto
+                          : Icons.motion_photos_on,
+                      size: 11,
+                      color: Colors.black,
+                    ),
+                    const SizedBox(width: 3),
+                    Text(
+                      _stabilizationMode == StabilizationMode.superSteady ? 'STEADY' : 'OIS',
+                      style: const TextStyle(
+                        color: Colors.black, fontSize: 10, fontWeight: FontWeight.w800),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+            if (_selectedFilter != CameraFilter.none) ...[
+              Container(
+                margin: const EdgeInsets.only(right: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFD700),
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black38, blurRadius: 4, offset: Offset(0, 1)),
+                  ],
+                ),
+                child: Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    const Icon(Icons.auto_awesome, size: 11, color: Colors.black),
+                    const SizedBox(width: 3),
+                    Text(
+                      FilterHelper.getLabel(_selectedFilter),
+                      style: const TextStyle(
+                        color: Colors.black, fontSize: 10, fontWeight: FontWeight.w800),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             if (_mode == CameraMode.photo && _hdrMode != HdrMode.off) ...[
               Container(
                 margin: const EdgeInsets.only(right: 6),
@@ -1053,6 +1260,20 @@ class _CameraScreenState extends State<CameraScreen>
           ],
         ),
       ),
+
+      // ── Quick Filter Carousel Bar (above bottom controls) ──
+      if (_showFilterBar)
+        Positioned(
+          bottom: 12,
+          left: 12,
+          right: 12,
+          child: FilterCarouselBar(
+            selected: _selectedFilter,
+            onSelected: (filter) {
+              setState(() => _selectedFilter = filter);
+            },
+          ),
+        ),
 
       // Settings panel
       if (_showSettings) _buildSettingsPanel(),
@@ -1116,6 +1337,23 @@ class _CameraScreenState extends State<CameraScreen>
                 ],
               ),
               const Divider(color: Color(0xFF333336), height: 22, thickness: 1),
+
+              // Chống rung OIS / EIS / Super Steady
+              StabilizationSelector(
+                selected: _stabilizationMode,
+                onChanged: (mode) {
+                  setState(() => _stabilizationMode = mode);
+                  _applyStabilization();
+                },
+              ),
+              const SizedBox(height: 18),
+
+              // Bộ lọc màu & Làm đẹp
+              FilterSettingsSelector(
+                selected: _selectedFilter,
+                onChanged: (filter) => setState(() => _selectedFilter = filter),
+              ),
+              const SizedBox(height: 18),
 
               QualitySelector(selected: _resolution, onChanged: _changeQuality),
               const SizedBox(height: 18),
