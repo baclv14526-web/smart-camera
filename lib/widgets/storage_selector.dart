@@ -54,6 +54,30 @@ class StorageSelector extends StatelessWidget {
             ),
           ],
         ),
+        const SizedBox(height: 8),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 5),
+          decoration: BoxDecoration(
+            color: const Color(0xFF242426),
+            borderRadius: BorderRadius.circular(8),
+            border: Border.all(color: const Color(0xFF38383A)),
+          ),
+          child: const Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Icon(Icons.folder_open, size: 14, color: Color(0xFFFFD700)),
+              SizedBox(width: 6),
+              Text(
+                'Thư mục lưu: CameraApp2026',
+                style: TextStyle(
+                  color: Colors.white70,
+                  fontSize: 11,
+                  fontWeight: FontWeight.w500,
+                ),
+              ),
+            ],
+          ),
+        ),
         if (!sdcardAvailable)
           Padding(
             padding: const EdgeInsets.only(top: 8),

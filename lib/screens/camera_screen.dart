@@ -116,28 +116,69 @@ class _CameraScreenState extends State<CameraScreen>
   Future<void> _detectSdCard() async {
     if (!Platform.isAndroid) return;
     try {
-      final dirs = await getExternalStorageDirectories();
-      if (dirs != null && dirs.length > 1) {
-        // dirs[0] = internal storage, dirs[1+] = removable SD cards
-        final sdDir = dirs[1];
-        _sdcardAppPath = sdDir.path;
-        final root = sdDir.path.split('Android').first;
-        _sdcardRootPath = root;
+      final sdRoots = <String>{};
 
-        // Verify write access to SD card app folder
-        final testDir = Directory(sdDir.path);
-        if (!testDir.existsSync()) {
-          testDir.createSync(recursive: true);
+      // 1. Direct /storage mount points scan (finds real physical SD cards)
+      try {
+        final storageDir = Directory('/storage');
+        if (storageDir.existsSync()) {
+          for (final entity in storageDir.listSync()) {
+            if (entity is Directory) {
+              final name = path.basename(entity.path);
+              if (name != 'emulated' &&
+                  name != 'self' &&
+                  name != 'knox' &&
+                  name != 'container' &&
+                  !name.startsWith('.')) {
+                sdRoots.add(entity.path);
+              }
+            }
+          }
         }
+      } catch (e) {
+        debugPrint('/storage mount scan: $e');
+      }
 
+      // 2. Query path_provider external storage directories
+      try {
+        final picDirs = await getExternalStorageDirectories(type: StorageDirectory.pictures);
+        if (picDirs != null) {
+          for (final dir in picDirs) {
+            if (!dir.path.contains('/emulated/0')) {
+              _sdcardAppPath = dir.path;
+              final root = dir.path.split('Android').first;
+              if (root.isNotEmpty) {
+                sdRoots.add(root.endsWith('/') ? root.substring(0, root.length - 1) : root);
+              }
+            }
+          }
+        }
+      } catch (_) {}
+
+      try {
+        final rawDirs = await getExternalStorageDirectories();
+        if (rawDirs != null && rawDirs.length > 1) {
+          final sdDir = rawDirs[1];
+          _sdcardAppPath ??= sdDir.path;
+          final root = sdDir.path.split('Android').first;
+          if (root.isNotEmpty) {
+            sdRoots.add(root.endsWith('/') ? root.substring(0, root.length - 1) : root);
+          }
+        }
+      } catch (_) {}
+
+      if (sdRoots.isNotEmpty) {
+        _sdcardRootPath = sdRoots.first;
         setState(() {
           _sdcardAvailable = true;
         });
+        debugPrint('SD Card detected: root=$_sdcardRootPath, appPath=$_sdcardAppPath');
         return;
       }
     } catch (e) {
       debugPrint('SD Card detection error: $e');
     }
+
     setState(() {
       _sdcardAvailable = false;
       _sdcardAppPath = null;
@@ -157,6 +198,7 @@ class _CameraScreenState extends State<CameraScreen>
       Permission.storage,
       Permission.photos,
       Permission.videos,
+      Permission.manageExternalStorage,
     ].request();
 
     final camOk = await Permission.camera.isGranted;
@@ -164,6 +206,7 @@ class _CameraScreenState extends State<CameraScreen>
 
     if (camOk && micOk) {
       _initCamera();
+      _detectSdCard();
     } else {
       setState(() => _isInitializing = false);
       if (mounted) {
@@ -227,15 +270,24 @@ class _CameraScreenState extends State<CameraScreen>
 
   // ── Flash ─────────────────────────────────────────────────────────────────────
   void _toggleFlash() {
-    final modes = [FlashMode.off, FlashMode.auto, FlashMode.always];
-    final next = modes[(modes.indexOf(_flashMode) + 1) % modes.length];
-    setState(() => _flashMode = next);
-    _controller?.setFlashMode(next);
+    if (_mode == CameraMode.photo) {
+      final modes = [FlashMode.off, FlashMode.auto, FlashMode.always];
+      final next = modes[(modes.indexOf(_flashMode) + 1) % modes.length];
+      setState(() => _flashMode = next);
+      _controller?.setFlashMode(next);
+    } else {
+      final next = _flashMode == FlashMode.torch || _flashMode == FlashMode.always
+          ? FlashMode.off
+          : FlashMode.torch;
+      setState(() => _flashMode = next);
+      _controller?.setFlashMode(next);
+    }
   }
 
   IconData get _flashIcon {
     switch (_flashMode) {
       case FlashMode.always:
+      case FlashMode.torch:
         return Icons.flash_on;
       case FlashMode.auto:
         return Icons.flash_auto;
@@ -256,71 +308,93 @@ class _CameraScreenState extends State<CameraScreen>
 
   // ── Save directory ────────────────────────────────────────────────────────────
   Future<String> _getSaveDir(bool isVideo) async {
-    final subFolder = isVideo ? 'Movies/CameraApp' : 'Pictures/CameraApp';
+    const appFolder = 'CameraApp2026';
+    final mediaTypeFolder = isVideo ? 'Movies' : 'Pictures';
 
     if (Platform.isAndroid) {
-      // 1. Try MicroSD Card if selected
+      // ── 1. If MicroSD Card is selected ──
       if (_storageLocation == StorageLocation.sdcard) {
-        final candidates = <String>[];
+        final sdCandidates = <String>[];
+
+        // Public folders on SD Card (DCIM / Pictures / Movies / CameraApp2026)
         if (_sdcardRootPath != null) {
-          candidates.add(path.join(_sdcardRootPath!, subFolder));
-        }
-        if (_sdcardAppPath != null) {
-          candidates.add(path.join(_sdcardAppPath!, isVideo ? 'Movies' : 'Pictures'));
-          candidates.add(_sdcardAppPath!);
+          sdCandidates.add(path.join(_sdcardRootPath!, 'DCIM', appFolder));
+          sdCandidates.add(path.join(_sdcardRootPath!, mediaTypeFolder, appFolder));
+          sdCandidates.add(path.join(_sdcardRootPath!, appFolder));
         }
 
-        for (final candidate in candidates) {
+        // App-specific folder on SD Card (guaranteed write access on Android 10+)
+        if (_sdcardAppPath != null) {
+          sdCandidates.add(path.join(_sdcardAppPath!, appFolder));
+          sdCandidates.add(path.join(_sdcardAppPath!, mediaTypeFolder, appFolder));
+          sdCandidates.add(_sdcardAppPath!);
+        }
+
+        // Package specific paths on SD
+        if (_sdcardRootPath != null) {
+          sdCandidates.add(path.join(_sdcardRootPath!, 'Android', 'data', 'com.example.camera_app', 'files', appFolder));
+          sdCandidates.add(path.join(_sdcardRootPath!, 'Android', 'media', 'com.example.camera_app', appFolder));
+        }
+
+        for (final candidate in sdCandidates) {
           try {
             final dir = Directory(candidate);
             if (!dir.existsSync()) {
               dir.createSync(recursive: true);
             }
-            final testFile = File(path.join(dir.path, '.write_test'));
+            final testFile = File(path.join(dir.path, '.test_${DateTime.now().millisecondsSinceEpoch}'));
             testFile.writeAsStringSync('ok');
             if (testFile.existsSync()) {
               testFile.deleteSync();
             }
+            debugPrint('Valid writable SD card directory: ${dir.path}');
             return dir.path;
           } catch (e) {
-            debugPrint('SD card write candidate $candidate failed: $e');
+            debugPrint('SD write candidate $candidate rejected: $e');
           }
         }
-        debugPrint('Cannot write to SD card, falling back to phone storage');
+        debugPrint('SD card write candidates rejected, falling back to phone storage');
       }
 
-      // 2. Internal Phone Storage
+      // ── 2. Internal Phone Storage ──
+      final phoneCandidates = <String>[
+        '/storage/emulated/0/DCIM/$appFolder',
+        '/storage/emulated/0/$mediaTypeFolder/$appFolder',
+        '/storage/emulated/0/$appFolder',
+      ];
+
       try {
         final ext = await getExternalStorageDirectory();
         if (ext != null) {
           final root = ext.path.split('Android').first;
-          final publicDir = Directory(path.join(root, subFolder));
-          try {
-            if (!publicDir.existsSync()) {
-              publicDir.createSync(recursive: true);
-            }
-            final testFile = File(path.join(publicDir.path, '.write_test'));
-            testFile.writeAsStringSync('ok');
-            if (testFile.existsSync()) {
-              testFile.deleteSync();
-            }
-            return publicDir.path;
-          } catch (_) {
-            final appExtDir = Directory(path.join(ext.path, isVideo ? 'Movies' : 'Pictures'));
-            if (!appExtDir.existsSync()) {
-              appExtDir.createSync(recursive: true);
-            }
-            return appExtDir.path;
-          }
+          phoneCandidates.insert(0, path.join(root, 'DCIM', appFolder));
+          phoneCandidates.insert(1, path.join(root, mediaTypeFolder, appFolder));
+          phoneCandidates.add(path.join(ext.path, appFolder));
         }
-      } catch (e) {
-        debugPrint('Phone storage error: $e');
+      } catch (_) {}
+
+      for (final candidate in phoneCandidates) {
+        try {
+          final dir = Directory(candidate);
+          if (!dir.existsSync()) {
+            dir.createSync(recursive: true);
+          }
+          final testFile = File(path.join(dir.path, '.test_${DateTime.now().millisecondsSinceEpoch}'));
+          testFile.writeAsStringSync('ok');
+          if (testFile.existsSync()) {
+            testFile.deleteSync();
+          }
+          debugPrint('Valid writable phone directory: ${dir.path}');
+          return dir.path;
+        } catch (e) {
+          debugPrint('Phone write candidate $candidate rejected: $e');
+        }
       }
     }
 
-    // 3. Fallback: Application Documents Directory
+    // ── 3. Fallback: Application Documents Directory ──
     final appDocDir = await getApplicationDocumentsDirectory();
-    final fallbackDir = Directory(path.join(appDocDir.path, subFolder));
+    final fallbackDir = Directory(path.join(appDocDir.path, appFolder));
     if (!fallbackDir.existsSync()) {
       fallbackDir.createSync(recursive: true);
     }
@@ -560,7 +634,6 @@ class _CameraScreenState extends State<CameraScreen>
       }
     }
   }
-
   // ── Video recording ───────────────────────────────────────────────────────────
   Future<void> _handleVideoButton() async {
     _isRecording ? await _stopRecording() : await _startRecording();
@@ -654,17 +727,22 @@ class _CameraScreenState extends State<CameraScreen>
   Widget _buildTopBar() {
     return Container(
       color: Colors.black,
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
+      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
       child: Row(
         mainAxisAlignment: MainAxisAlignment.spaceBetween,
+        crossAxisAlignment: CrossAxisAlignment.center,
         children: [
+          // Left: Flash & HDR
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
               IconButton(
-                icon: Icon(_flashIcon, color: Colors.white),
-                onPressed: _mode == CameraMode.photo ? _toggleFlash : null,
-                tooltip: 'Flash',
+                icon: Icon(
+                  _flashIcon,
+                  color: _flashMode != FlashMode.off ? const Color(0xFFFFD700) : Colors.white,
+                ),
+                onPressed: _toggleFlash,
+                tooltip: _mode == CameraMode.photo ? 'Đèn Flash' : 'Đèn chiếu sáng (Torch)',
               ),
               if (_mode == CameraMode.photo) ...[
                 const SizedBox(width: 2),
@@ -719,47 +797,88 @@ class _CameraScreenState extends State<CameraScreen>
               ],
             ],
           ),
+
+          // Center: Recording timer or Mode Title
           if (_isRecording)
-            Row(children: [
-              const Icon(Icons.fiber_manual_record, color: Colors.red, size: 14),
-              const SizedBox(width: 6),
-              Text(
-                _formatDuration(_recordingElapsed),
-                style: const TextStyle(
-                  color: Colors.white, fontSize: 16,
-                  fontWeight: FontWeight.bold, fontFamily: 'monospace',
-                ),
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+              decoration: BoxDecoration(
+                color: Colors.red.withAlpha(40),
+                borderRadius: BorderRadius.circular(12),
+                border: Border.all(color: Colors.red.withAlpha(120)),
               ),
-              if (_selectedVideoDuration != 'Tắt')
-                Text(' / $_selectedVideoDuration',
-                    style: const TextStyle(color: Colors.white54, fontSize: 14)),
-            ])
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  const Icon(Icons.fiber_manual_record, color: Colors.red, size: 14),
+                  const SizedBox(width: 6),
+                  Text(
+                    _formatDuration(_recordingElapsed),
+                    style: const TextStyle(
+                      color: Colors.white,
+                      fontSize: 15,
+                      fontWeight: FontWeight.bold,
+                      fontFamily: 'monospace',
+                    ),
+                  ),
+                  if (_selectedVideoDuration != 'Tắt')
+                    Text(
+                      ' / $_selectedVideoDuration',
+                      style: const TextStyle(color: Colors.white70, fontSize: 13),
+                    ),
+                ],
+              ),
+            )
           else
-            const Text('Camera',
-                style: TextStyle(color: Colors.white, fontSize: 18, fontWeight: FontWeight.bold)),
-          Row(mainAxisSize: MainAxisSize.min, children: [
-            // Lưới 9 ô
-            AnimatedSwitcher(
-              duration: const Duration(milliseconds: 200),
-              child: IconButton(
-                key: ValueKey(_showGrid),
-                icon: Icon(
-                  _showGrid ? Icons.grid_on : Icons.grid_off,
-                  color: _showGrid ? const Color(0xFFFFD700) : Colors.white,
+            Text(
+              _mode == CameraMode.photo ? 'CHỤP ẢNH' : 'QUAY VIDEO',
+              style: const TextStyle(
+                color: Colors.white70,
+                fontSize: 13,
+                fontWeight: FontWeight.bold,
+                letterSpacing: 1.0,
+              ),
+            ),
+
+          // Right: Grid & ALWAYS-VISIBLE Setting Button
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Grid Toggle
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                child: IconButton(
+                  key: ValueKey(_showGrid),
+                  icon: Icon(
+                    _showGrid ? Icons.grid_on : Icons.grid_off,
+                    color: _showGrid ? const Color(0xFFFFD700) : Colors.white,
+                  ),
+                  onPressed: () => setState(() => _showGrid = !_showGrid),
+                  tooltip: _showGrid ? 'Tắt lưới 9 ô' : 'Bật lưới 9 ô',
                 ),
-                onPressed: () => setState(() => _showGrid = !_showGrid),
-                tooltip: _showGrid ? 'Tắt lưới' : 'Bật lưới',
               ),
-            ),
-            IconButton(
-              icon: Icon(
-                Icons.tune,
-                color: _showSettings ? const Color(0xFFFFD700) : Colors.white,
+
+              // Camera Settings Button (Always Visible & Prominent)
+              Container(
+                decoration: _showSettings
+                    ? BoxDecoration(
+                        color: const Color(0xFFFFD700).withAlpha(40),
+                        shape: BoxShape.circle,
+                        border: Border.all(color: const Color(0xFFFFD700), width: 1.2),
+                      )
+                    : null,
+                child: IconButton(
+                  icon: Icon(
+                    Icons.tune,
+                    color: _showSettings ? const Color(0xFFFFD700) : Colors.white,
+                    size: 22,
+                  ),
+                  onPressed: () => setState(() => _showSettings = !_showSettings),
+                  tooltip: 'Cài đặt camera',
+                ),
               ),
-              onPressed: () => setState(() => _showSettings = !_showSettings),
-              tooltip: 'Cài đặt',
-            ),
-          ]),
+            ],
+          ),
         ],
       ),
     );
