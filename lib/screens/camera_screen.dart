@@ -96,6 +96,16 @@ class _CameraScreenState extends State<CameraScreen>
   // ── HDR Mode ─────────────────────────────────────────────────────────────────
   HdrMode _hdrMode = HdrMode.auto;
 
+  // ── Mirror / Selfie Flip (front camera) ─────────────────────────────────────
+  /// Lật ảnh ngang khi dùng camera trước. Mặc định bật khi chụp bằng camera trước.
+  bool _mirrorFrontCamera = true;
+
+  // Helper: is current camera the front (selfie) camera?
+  bool get _isFrontCamera =>
+      widget.cameras.isNotEmpty &&
+      _cameraIndex < widget.cameras.length &&
+      widget.cameras[_cameraIndex].lensDirection == CameraLensDirection.front;
+
   // ── Flash ────────────────────────────────────────────────────────────────────
   FlashMode _flashMode = FlashMode.off;
 
@@ -285,9 +295,14 @@ class _CameraScreenState extends State<CameraScreen>
   // ── Switch camera ─────────────────────────────────────────────────────────────
   Future<void> _switchCamera() async {
     if (widget.cameras.length < 2) return;
+    final nextIndex = _cameraIndex == 0 ? 1 : 0;
+    final nextIsFront = nextIndex < widget.cameras.length &&
+        widget.cameras[nextIndex].lensDirection == CameraLensDirection.front;
     setState(() {
-      _cameraIndex = _cameraIndex == 0 ? 1 : 0;
+      _cameraIndex = nextIndex;
       _isInitializing = true;
+      // Auto-enable mirror when switching to front camera
+      if (nextIsFront) _mirrorFrontCamera = true;
     });
     await _initCamera();
   }
@@ -517,14 +532,16 @@ class _CameraScreenState extends State<CameraScreen>
     setState(() { _photoCountdown = 0; _isPhotoCountingDown = false; });
   }
 
-  // ── Photo Post-Processing: Beauty Filter, HDR Low-Light & Timestamp ──────────────
+  // ── Photo Post-Processing: Beauty Filter, HDR Low-Light, Timestamp & Mirror ─
   Future<void> _processCapturedPhoto(String sourcePath, String destPath) async {
     final applyHdr = _hdrMode == HdrMode.on || _hdrMode == HdrMode.auto;
     final applyTimestamp = _showTimestamp;
     final filterMatrix = FilterHelper.getMatrix(_selectedFilter);
     final applyFilter = filterMatrix != null;
+    // Mirror flip: apply when front camera AND mirror setting is enabled
+    final applyMirror = _isFrontCamera && _mirrorFrontCamera;
 
-    if (!applyHdr && !applyTimestamp && !applyFilter) {
+    if (!applyHdr && !applyTimestamp && !applyFilter && !applyMirror) {
       await File(sourcePath).copy(destPath);
       return;
     }
@@ -537,6 +554,13 @@ class _CameraScreenState extends State<CameraScreen>
 
       final recorder = ui.PictureRecorder();
       final canvas = Canvas(recorder);
+
+      // Apply horizontal mirror flip for front camera selfie
+      if (applyMirror) {
+        canvas.save();
+        canvas.translate(image.width.toDouble(), 0);
+        canvas.scale(-1.0, 1.0);
+      }
 
       // 1. Base image layer (with color/beauty filter if selected)
       final basePaint = Paint();
@@ -567,6 +591,11 @@ class _CameraScreenState extends State<CameraScreen>
             0.0, 0.0, 0.0, 1.0, 0,
           ]);
         canvas.drawImage(image, Offset.zero, hdrVibrancePaint);
+      }
+
+      // Restore canvas transform after mirror
+      if (applyMirror) {
+        canvas.restore();
       }
 
       // 4. Timestamp Watermark (if enabled)
@@ -709,6 +738,7 @@ class _CameraScreenState extends State<CameraScreen>
       }
     }
   }
+
   // ── Video recording ───────────────────────────────────────────────────────────
   Future<void> _handleVideoButton() async {
     _isRecording ? await _stopRecording() : await _startRecording();
@@ -738,24 +768,144 @@ class _CameraScreenState extends State<CameraScreen>
     if (_controller == null || !_isRecording) return;
     _recordingTimer?.cancel();
     _autoStopTimer?.cancel();
+
+    // Mark not recording immediately so UI updates and double-stop is prevented
+    setState(() { _isRecording = false; _recordingElapsed = 0; });
+
+    XFile? xFile;
     try {
-      final xFile = await _controller!.stopVideoRecording();
-      WakelockPlus.disable();
-      final dir = await _getSaveDir(true);
-      final filePath = path.join(dir, 'VID_${DateTime.now().millisecondsSinceEpoch}.mp4');
-      await File(xFile.path).copy(filePath);
-      setState(() { _isRecording = false; _recordingElapsed = 0; _lastSavedPath = filePath; _lastSavedIsVideo = true; });
-      if (mounted) {
-        final locText = _storageLocation == StorageLocation.sdcard ? 'thẻ nhớ SD' : 'điện thoại';
-        _showSnackbar('✅ Đã lưu video vào $locText', Colors.green);
-        _openPreview(filePath, true);
-      }
+      xFile = await _controller!.stopVideoRecording();
     } catch (e) {
       WakelockPlus.disable();
-      setState(() => _isRecording = false);
-      debugPrint('Stop recording error: $e');
+      debugPrint('stopVideoRecording error: $e');
+      if (mounted) _showSnackbar('❌ Lỗi dừng ghi video: $e', Colors.red);
+      return;
+    }
+
+    WakelockPlus.disable();
+
+    // Show saving progress (especially important for large SD card writes)
+    if (mounted) {
+      _showSnackbar('💾 Đang lưu video, vui lòng chờ...', Colors.blueGrey);
+    }
+
+    try {
+      final srcPath = xFile.path;
+      final srcFile = File(srcPath);
+
+      // Validate source file exists and has content
+      if (!srcFile.existsSync() || srcFile.lengthSync() == 0) {
+        throw Exception('File video tạm rỗng hoặc không tồn tại: $srcPath');
+      }
+
+      final srcSize = srcFile.lengthSync();
+      debugPrint('Video source: $srcPath (${(srcSize / 1024 / 1024).toStringAsFixed(1)} MB)');
+
+      // Resolve destination directory
+      final dir = await _getSaveDir(true);
+      final fileName = 'VID_${DateTime.now().millisecondsSinceEpoch}.mp4';
+      final destPath = path.join(dir, fileName);
+
+      // ── Streaming copy: chunk-by-chunk to avoid OOM on large files ──
+      // This is critical for SD card: File.copy() can crash with > 100 MB files
+      // because Android imposes cross-filesystem copy size limits.
+      await _streamCopyFile(srcPath, destPath);
+
+      // Validate destination was written correctly (at least 95% of source size)
+      final destFile = File(destPath);
+      final destSize = destFile.existsSync() ? destFile.lengthSync() : 0;
+      if (destSize < (srcSize * 0.95).toInt()) {
+        throw Exception(
+          'File đích không đủ dung lượng: ${(destSize / 1024 / 1024).toStringAsFixed(1)} MB '
+          '/ ${(srcSize / 1024 / 1024).toStringAsFixed(1)} MB',
+        );
+      }
+
+      debugPrint('Video saved: $destPath (${(destSize / 1024 / 1024).toStringAsFixed(1)} MB)');
+
+      // Clean up source temp file to free camera temp storage
+      try { srcFile.deleteSync(); } catch (_) {}
+
       if (mounted) {
-        _showSnackbar('❌ Lỗi khi lưu video: $e', Colors.red);
+        setState(() { _lastSavedPath = destPath; _lastSavedIsVideo = true; });
+        final locText = _storageLocation == StorageLocation.sdcard ? 'thẻ nhớ SD' : 'điện thoại';
+        _showSnackbar('✅ Đã lưu video vào $locText', Colors.green);
+        _openPreview(destPath, true);
+      }
+    } catch (e) {
+      debugPrint('Save video error: $e');
+      if (mounted) {
+        // Try fallback: save to phone internal storage instead
+        await _saveVideoFallbackToPhone(xFile.path, e.toString());
+      }
+    }
+  }
+
+  /// Streams a file copy chunk-by-chunk so large video files (hundreds of MB)
+  /// are transferred without loading everything into RAM or blocking the main thread.
+  Future<void> _streamCopyFile(String srcPath, String destPath) async {
+    final src = File(srcPath);
+    final dest = File(destPath);
+
+    // Ensure parent directory exists
+    final parent = dest.parent;
+    if (!parent.existsSync()) {
+      parent.createSync(recursive: true);
+    }
+
+    final input = src.openRead();
+    final output = dest.openWrite();
+    try {
+      await input.pipe(output);
+      // pipe() closes the output sink automatically; flush to ensure OS commits
+      await output.flush();
+    } catch (e) {
+      // Clean up partial destination file on error
+      try {
+        await output.close();
+        if (dest.existsSync()) dest.deleteSync();
+      } catch (_) {}
+      rethrow;
+    }
+  }
+
+  /// Fallback: if SD card save fails, attempt to save to phone internal storage.
+  Future<void> _saveVideoFallbackToPhone(String srcPath, String originalError) async {
+    debugPrint('Attempting phone storage fallback after: $originalError');
+    try {
+      final srcFile = File(srcPath);
+      if (!srcFile.existsSync()) {
+        _showSnackbar('❌ Lỗi lưu video: file tạm không còn tồn tại', Colors.red);
+        return;
+      }
+
+      // Temporarily force phone storage for this save
+      final prevStorage = _storageLocation;
+      _storageLocation = StorageLocation.phone;
+      final dir = await _getSaveDir(true);
+      _storageLocation = prevStorage;
+
+      final fileName = 'VID_RECOVERY_${DateTime.now().millisecondsSinceEpoch}.mp4';
+      final destPath = path.join(dir, fileName);
+
+      await _streamCopyFile(srcPath, destPath);
+      try { srcFile.deleteSync(); } catch (_) {}
+
+      if (mounted) {
+        setState(() { _lastSavedPath = destPath; _lastSavedIsVideo = true; });
+        _showSnackbar(
+          '⚠️ SD card lỗi — Đã tự động lưu vào điện thoại thay thế',
+          Colors.orange,
+        );
+        _openPreview(destPath, true);
+      }
+    } catch (fallbackError) {
+      debugPrint('Fallback also failed: $fallbackError');
+      if (mounted) {
+        _showSnackbar(
+          '❌ Không thể lưu video: SD card lỗi & điện thoại cũng thất bại.\n$originalError',
+          Colors.red,
+        );
       }
     }
   }
@@ -806,150 +956,308 @@ class _CameraScreenState extends State<CameraScreen>
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          // ── Left: Flash, HDR, Filter, and Stabilization Buttons ──
+          // ── Left: Flash, HDR, Filter, Stabilization, and Title (Scrollable) ──
+          Expanded(
+            child: SingleChildScrollView(
+              scrollDirection: Axis.horizontal,
+              physics: const BouncingScrollPhysics(),
+              child: Row(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  IconButton(
+                    icon: Icon(
+                      _flashIcon,
+                      color: _flashMode != FlashMode.off ? const Color(0xFFFFD700) : Colors.white,
+                    ),
+                    onPressed: _toggleFlash,
+                    tooltip: _mode == CameraMode.photo ? 'Đèn Flash' : 'Đèn chiếu sáng (Torch)',
+                  ),
+                  if (_mode == CameraMode.photo) ...[
+                    const SizedBox(width: 2),
+                    GestureDetector(
+                      onTap: _cycleHdrMode,
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                        decoration: BoxDecoration(
+                          color: _hdrMode != HdrMode.off
+                              ? const Color(0xFFFFD700).withAlpha(35)
+                              : Colors.transparent,
+                          borderRadius: BorderRadius.circular(12),
+                          border: Border.all(
+                            color: _hdrMode != HdrMode.off
+                                ? const Color(0xFFFFD700)
+                                : Colors.white24,
+                          ),
+                        ),
+                        child: Row(
+                          mainAxisSize: MainAxisSize.min,
+                          children: [
+                            Icon(
+                              _hdrMode == HdrMode.on
+                                  ? Icons.hdr_on
+                                  : _hdrMode == HdrMode.auto
+                                      ? Icons.hdr_auto
+                                      : Icons.hdr_off,
+                              size: 14,
+                              color: _hdrMode != HdrMode.off
+                                  ? const Color(0xFFFFD700)
+                                  : Colors.white70,
+                            ),
+                            const SizedBox(width: 3),
+                            Text(
+                              _hdrMode == HdrMode.on
+                                  ? 'HDR'
+                                  : _hdrMode == HdrMode.auto
+                                      ? 'HDR A'
+                                      : 'HDR TẮT',
+                              style: TextStyle(
+                                color: _hdrMode != HdrMode.off
+                                    ? const Color(0xFFFFD700)
+                                    : Colors.white70,
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                  ],
+                  const SizedBox(width: 4),
+                  // Nút bật/tắt thanh chọn Filter & Làm đẹp
+                  GestureDetector(
+                    onTap: () => setState(() => _showFilterBar = !_showFilterBar),
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: _selectedFilter != CameraFilter.none || _showFilterBar
+                            ? const Color(0xFFFFD700).withAlpha(35)
+                            : Colors.transparent,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: _selectedFilter != CameraFilter.none || _showFilterBar
+                              ? const Color(0xFFFFD700)
+                              : Colors.white24,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            Icons.auto_awesome,
+                            size: 14,
+                            color: _selectedFilter != CameraFilter.none || _showFilterBar
+                                ? const Color(0xFFFFD700)
+                                : Colors.white70,
+                          ),
+                          if (_selectedFilter != CameraFilter.none) ...[
+                            const SizedBox(width: 3),
+                            Text(
+                              FilterHelper.getLabel(_selectedFilter),
+                              style: const TextStyle(
+                                color: Color(0xFFFFD700),
+                                fontSize: 10,
+                                fontWeight: FontWeight.bold,
+                              ),
+                            ),
+                          ],
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 4),
+                  // Nút chuyển nhanh Chống Rung OIS / Super Steady
+                  GestureDetector(
+                    onTap: _cycleStabilizationMode,
+                    child: Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: _stabilizationMode != StabilizationMode.off
+                            ? const Color(0xFFFFD700).withAlpha(35)
+                            : Colors.transparent,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(
+                          color: _stabilizationMode != StabilizationMode.off
+                              ? const Color(0xFFFFD700)
+                              : Colors.white24,
+                        ),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          Icon(
+                            _stabilizationMode == StabilizationMode.superSteady
+                                ? Icons.motion_photos_auto
+                                : _stabilizationMode == StabilizationMode.standard
+                                    ? Icons.motion_photos_on
+                                    : Icons.motion_photos_off,
+                            size: 14,
+                            color: _stabilizationMode != StabilizationMode.off
+                                ? const Color(0xFFFFD700)
+                                : Colors.white70,
+                          ),
+                          const SizedBox(width: 3),
+                          Text(
+                            _stabilizationMode == StabilizationMode.superSteady
+                                ? 'STEADY'
+                                : _stabilizationMode == StabilizationMode.standard
+                                    ? 'OIS'
+                                    : 'OIS TẮT',
+                            style: TextStyle(
+                              color: _stabilizationMode != StabilizationMode.off
+                                  ? const Color(0xFFFFD700)
+                                  : Colors.white70,
+                              fontSize: 10,
+                              fontWeight: FontWeight.bold,
+                            ),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  // Recording Timer or Mode Title
+                  if (_isRecording)
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
+                      decoration: BoxDecoration(
+                        color: Colors.red.withAlpha(40),
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.red.withAlpha(120)),
+                      ),
+                      child: Row(
+                        mainAxisSize: MainAxisSize.min,
+                        children: [
+                          const Icon(Icons.fiber_manual_record, color: Colors.red, size: 14),
+                          const SizedBox(width: 6),
+                          Text(
+                            _formatDuration(_recordingElapsed),
+                            style: const TextStyle(
+                              color: Colors.white,
+                              fontSize: 14,
+                              fontWeight: FontWeight.bold,
+                              fontFamily: 'monospace',
+                            ),
+                          ),
+                          if (_selectedVideoDuration != 'Tắt')
+                            Text(
+                              ' / $_selectedVideoDuration',
+                              style: const TextStyle(color: Colors.white70, fontSize: 12),
+                            ),
+                        ],
+                      ),
+                    )
+                  else
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 6),
+                      child: Text(
+                        _mode == CameraMode.photo ? 'CHỤP ẢNH' : 'QUAY VIDEO',
+                        style: const TextStyle(
+                          color: Colors.white70,
+                          fontSize: 13,
+                          fontWeight: FontWeight.bold,
+                          letterSpacing: 1.0,
+                        ),
+                      ),
+                    ),
+                ],
+              ),
+            ),
+          ),
+
+          const SizedBox(width: 6),
+
+          // ── Right: Grid & Settings Buttons (ALWAYS PINNED, HIGH VISIBILITY, GUARANTEED UNTRUNCATED) ──
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              IconButton(
-                icon: Icon(
-                  _flashIcon,
-                  color: _flashMode != FlashMode.off ? const Color(0xFFFFD700) : Colors.white,
-                ),
-                onPressed: _toggleFlash,
-                tooltip: _mode == CameraMode.photo ? 'Đèn Flash' : 'Đèn chiếu sáng (Torch)',
-              ),
-              if (_mode == CameraMode.photo) ...[
-                const SizedBox(width: 2),
-                GestureDetector(
-                  onTap: _cycleHdrMode,
-                  child: Container(
-                    padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-                    decoration: BoxDecoration(
-                      color: _hdrMode != HdrMode.off
-                          ? const Color(0xFFFFD700).withAlpha(35)
-                          : Colors.transparent,
-                      borderRadius: BorderRadius.circular(12),
-                      border: Border.all(
-                        color: _hdrMode != HdrMode.off
-                            ? const Color(0xFFFFD700)
-                            : Colors.white24,
+              // Grid Toggle Icon Button
+              Tooltip(
+                message: _showGrid ? 'Tắt lưới 9 ô' : 'Bật lưới 9 ô',
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: () => setState(() => _showGrid = !_showGrid),
+                    borderRadius: BorderRadius.circular(20),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: _showGrid
+                            ? const Color(0xFFFFD700).withAlpha(45)
+                            : Colors.white.withAlpha(25),
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: _showGrid ? const Color(0xFFFFD700) : Colors.white38,
+                          width: 1.2,
+                        ),
+                        boxShadow: _showGrid
+                            ? [
+                                BoxShadow(
+                                  color: const Color(0xFFFFD700).withAlpha(90),
+                                  blurRadius: 6,
+                                  spreadRadius: 1,
+                                )
+                              ]
+                            : null,
+                      ),
+                      child: Icon(
+                        _showGrid ? Icons.grid_on : Icons.grid_off,
+                        color: _showGrid ? const Color(0xFFFFD700) : Colors.white,
+                        size: 20,
                       ),
                     ),
-                    child: Row(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          _hdrMode == HdrMode.on
-                              ? Icons.hdr_on
-                              : _hdrMode == HdrMode.auto
-                                  ? Icons.hdr_auto
-                                  : Icons.hdr_off,
-                          size: 14,
-                          color: _hdrMode != HdrMode.off
-                              ? const Color(0xFFFFD700)
-                              : Colors.white70,
-                        ),
-                        const SizedBox(width: 3),
-                        Text(
-                          _hdrMode == HdrMode.on
-                              ? 'HDR'
-                              : _hdrMode == HdrMode.auto
-                                  ? 'HDR A'
-                                  : 'HDR TẮT',
-                          style: TextStyle(
-                            color: _hdrMode != HdrMode.off
-                                ? const Color(0xFFFFD700)
-                                : Colors.white70,
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-              const SizedBox(width: 4),
-              // Nút bật/tắt thanh chọn Filter & Làm đẹp
-              GestureDetector(
-                onTap: () => setState(() => _showFilterBar = !_showFilterBar),
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: _selectedFilter != CameraFilter.none || _showFilterBar
-                        ? const Color(0xFFFFD700).withAlpha(35)
-                        : Colors.transparent,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: _selectedFilter != CameraFilter.none || _showFilterBar
-                          ? const Color(0xFFFFD700)
-                          : Colors.white24,
-                    ),
-                  ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        Icons.auto_awesome,
-                        size: 14,
-                        color: _selectedFilter != CameraFilter.none || _showFilterBar
-                            ? const Color(0xFFFFD700)
-                            : Colors.white70,
-                      ),
-                      if (_selectedFilter != CameraFilter.none) ...[
-                        const SizedBox(width: 3),
-                        Text(
-                          FilterHelper.getLabel(_selectedFilter),
-                          style: const TextStyle(
-                            color: Color(0xFFFFD700),
-                            fontSize: 10,
-                            fontWeight: FontWeight.bold,
-                          ),
-                        ),
-                      ],
-                    ],
                   ),
                 ),
               ),
-              const SizedBox(width: 4),
-              // Nút chuyển nhanh Chống Rung OIS / Super Steady
-              GestureDetector(
-                onTap: _cycleStabilizationMode,
-                child: Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
-                  decoration: BoxDecoration(
-                    color: _stabilizationMode != StabilizationMode.off
-                        ? const Color(0xFFFFD700).withAlpha(35)
-                        : Colors.transparent,
-                    borderRadius: BorderRadius.circular(12),
-                    border: Border.all(
-                      color: _stabilizationMode != StabilizationMode.off
-                          ? const Color(0xFFFFD700)
-                          : Colors.white24,
+
+              const SizedBox(width: 8),
+
+              // Camera Settings Icon Button
+              Tooltip(
+                message: 'Cài đặt camera',
+                child: Material(
+                  color: Colors.transparent,
+                  child: InkWell(
+                    onTap: () => setState(() => _showSettings = !_showSettings),
+                    borderRadius: BorderRadius.circular(20),
+                    child: AnimatedContainer(
+                      duration: const Duration(milliseconds: 200),
+                      padding: const EdgeInsets.all(8),
+                      decoration: BoxDecoration(
+                        color: _showSettings
+                            ? const Color(0xFFFFD700).withAlpha(45)
+                            : Colors.white.withAlpha(25),
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: _showSettings ? const Color(0xFFFFD700) : Colors.white38,
+                          width: 1.2,
+                        ),
+                        boxShadow: _showSettings
+                            ? [
+                                BoxShadow(
+                                  color: const Color(0xFFFFD700).withAlpha(90),
+                                  blurRadius: 6,
+                                  spreadRadius: 1,
+                                )
+                              ]
+                            : null,
+                      ),
+                      child: Icon(
+                        Icons.tune,
+                        color: _showSettings ? const Color(0xFFFFD700) : Colors.white,
+                        size: 20,
+                      ),
                     ),
                   ),
-                  child: Row(
-                    mainAxisSize: MainAxisSize.min,
-                    children: [
-                      Icon(
-                        _stabilizationMode == StabilizationMode.superSteady
-                            ? Icons.motion_photos_auto
-                            : _stabilizationMode == StabilizationMode.standard
-                                ? Icons.motion_photos_on
-                                : Icons.motion_photos_off,
-                        size: 14,
-                        color: _stabilizationMode != StabilizationMode.off
-                            ? const Color(0xFFFFD700)
-                            : Colors.white70,
-                      ),
-                      const SizedBox(width: 3),
-                      Text(
-                        _stabilizationMode == StabilizationMode.superSteady
-                            ? 'STEADY'
-                            : _stabilizationMode == StabilizationMode.standard
-                                ? 'OIS'
-                                : 'OIS TẮT',
-                        style: TextStyle(
+                ),
+              ),
+            ],
+          ),
+        ],
+      ),
+    );
+  }tStyle(
                           color: _stabilizationMode != StabilizationMode.off
                               ? const Color(0xFFFFD700)
                               : Colors.white70,
@@ -1090,6 +1398,15 @@ class _CameraScreenState extends State<CameraScreen>
     if (matrix != null) {
       preview = ColorFiltered(
         colorFilter: ColorFilter.matrix(matrix),
+        child: preview,
+      );
+    }
+
+    // Apply horizontal mirror flip for front camera selfie preview
+    if (_isFrontCamera && _mirrorFrontCamera) {
+      preview = Transform(
+        alignment: Alignment.center,
+        transform: Matrix4.identity()..scale(-1.0, 1.0, 1.0),
         child: preview,
       );
     }
@@ -1397,6 +1714,15 @@ class _CameraScreenState extends State<CameraScreen>
               ),
               const SizedBox(height: 18),
 
+              // Lưới 9 ô (Rule of thirds)
+              _buildGridSettingsSelector(),
+              const SizedBox(height: 18),
+
+              // Lật ảnh (Mirror / Selfie Flip) — hiển thị cho cả 2 camera,
+              // mặc định BẬT khi camera trước đang hoạt động
+              _buildMirrorSettingsSelector(),
+              const SizedBox(height: 18),
+
               QualitySelector(selected: _resolution, onChanged: _changeQuality),
               const SizedBox(height: 18),
               if (_mode == CameraMode.photo) ...[
@@ -1671,6 +1997,115 @@ class _CameraScreenState extends State<CameraScreen>
       ),
     );
   }
+
+  // ── Grid Settings Selector ──────────────────────────────────────────────────
+  Widget _buildGridSettingsSelector() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Row(
+          children: [
+            Icon(Icons.grid_on, size: 16, color: Color(0xFFFFD700)),
+            SizedBox(width: 6),
+            Text(
+              'LƯỚI 9 Ô (RULE OF THIRDS)',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            _GridOption(
+              icon: Icons.grid_on,
+              label: 'Hiện lưới 9 ô',
+              isSelected: _showGrid,
+              onTap: () => setState(() => _showGrid = true),
+            ),
+            const SizedBox(width: 10),
+            _GridOption(
+              icon: Icons.grid_off,
+              label: 'Tắt lưới',
+              isSelected: !_showGrid,
+              onTap: () => setState(() => _showGrid = false),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  // ── Mirror / Selfie Flip Settings Selector ────────────────────────────────────
+  Widget _buildMirrorSettingsSelector() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            const Icon(Icons.flip, size: 16, color: Color(0xFFFFD700)),
+            const SizedBox(width: 6),
+            const Text(
+              'LẬT ẢNH SELFIE (MIRROR)',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+              ),
+            ),
+            const SizedBox(width: 8),
+            if (_isFrontCamera)
+              Container(
+                padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                decoration: BoxDecoration(
+                  color: const Color(0xFFFFD700).withAlpha(40),
+                  borderRadius: BorderRadius.circular(8),
+                  border: Border.all(color: const Color(0xFFFFD700), width: 0.8),
+                ),
+                child: const Text(
+                  'Camera trước',
+                  style: TextStyle(
+                    color: Color(0xFFFFD700),
+                    fontSize: 9,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        Text(
+          _isFrontCamera
+              ? 'Lật gương ảnh selfie. Mặc định BẬT khi dùng camera trước.'
+              : 'Chỉ áp dụng khi chuyển sang camera trước.',
+          style: const TextStyle(color: Colors.white38, fontSize: 11),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            _GridOption(
+              icon: Icons.flip,
+              label: 'Bật lật ảnh',
+              isSelected: _mirrorFrontCamera,
+              onTap: () => setState(() => _mirrorFrontCamera = true),
+            ),
+            const SizedBox(width: 10),
+            _GridOption(
+              icon: Icons.flip_outlined,
+              label: 'Tắt lật ảnh',
+              isSelected: !_mirrorFrontCamera,
+              onTap: () => setState(() => _mirrorFrontCamera = false),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
 }
 
 class _GridPainter extends CustomPainter {
@@ -1743,6 +2178,68 @@ class _ModeButton extends StatelessWidget {
             fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
             fontSize: 14,
           ),
+        ),
+      ),
+    );
+  }
+}
+
+// ── Grid option button ─────────────────────────────────────────────────────────
+class _GridOption extends StatelessWidget {
+  final IconData icon;
+  final String label;
+  final bool isSelected;
+  final VoidCallback onTap;
+
+  const _GridOption({
+    required this.icon,
+    required this.label,
+    required this.isSelected,
+    required this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return GestureDetector(
+      onTap: onTap,
+      child: AnimatedContainer(
+        duration: const Duration(milliseconds: 180),
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
+        decoration: BoxDecoration(
+          color: isSelected ? const Color(0xFFFFD700) : const Color(0xFF2C2C2E),
+          borderRadius: BorderRadius.circular(20),
+          border: Border.all(
+            color: isSelected ? const Color(0xFFFFD700) : const Color(0xFF48484A),
+            width: 1.2,
+          ),
+          boxShadow: isSelected
+              ? [
+                  BoxShadow(
+                    color: const Color(0xFFFFD700).withAlpha(80),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ]
+              : null,
+        ),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Icon(
+              icon,
+              size: 16,
+              color: isSelected ? Colors.black87 : Colors.white70,
+            ),
+            const SizedBox(width: 6),
+            Text(
+              label,
+              style: TextStyle(
+                color: isSelected ? Colors.black87 : Colors.white,
+                fontSize: 13,
+                fontWeight: isSelected ? FontWeight.bold : FontWeight.normal,
+              ),
+            ),
+          ],
         ),
       ),
     );
