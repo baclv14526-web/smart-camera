@@ -14,6 +14,7 @@ import '../widgets/timestamp_selector.dart';
 import '../widgets/hdr_selector.dart';
 import '../widgets/filter_selector.dart';
 import '../widgets/stabilization_selector.dart';
+import '../widgets/zoom_selector.dart';
 import 'preview_screen.dart';
 
 enum CameraMode { photo, video }
@@ -35,6 +36,12 @@ class _CameraScreenState extends State<CameraScreen>
 
   // ── Mode ────────────────────────────────────────────────────────────────────
   CameraMode _mode = CameraMode.photo;
+
+  // ── Zoom (0.5x, 1x, 2x, 4x, 10x - Default 1x) ──────────────────────────────
+  double _currentZoom = 1.0;
+  double _minAvailableZoom = 1.0;
+  double _maxAvailableZoom = 10.0;
+  double _baseScale = 1.0;
 
   // ── Photo timer ─────────────────────────────────────────────────────────────
   final List<String> _photoTimerOptions = ['Tắt', '3s', '5s', '10s', '15s'];
@@ -243,10 +250,35 @@ class _CameraScreenState extends State<CameraScreen>
     try {
       await controller.initialize();
       await controller.setFlashMode(_flashMode);
+
+      // Query hardware zoom capabilities (Default 1x)
+      try {
+        final minZ = await controller.getMinZoomLevel();
+        final maxZ = await controller.getMaxZoomLevel();
+        _minAvailableZoom = minZ;
+        _maxAvailableZoom = maxZ.clamp(1.0, 10.0);
+        _currentZoom = 1.0.clamp(minZ, _maxAvailableZoom);
+        await controller.setZoomLevel(_currentZoom);
+      } catch (e) {
+        debugPrint('Zoom level query error: $e');
+      }
+
       if (mounted) setState(() => _isInitializing = false);
     } on CameraException catch (e) {
       debugPrint('Camera init error: $e');
       if (mounted) setState(() => _isInitializing = false);
+    }
+  }
+
+  // ── Set Zoom Level (0.5x, 1x, 2x, 4x, 10x) ──────────────────────────────────
+  Future<void> _setZoom(double zoom) async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+    final targetZoom = zoom.clamp(_minAvailableZoom, _maxAvailableZoom);
+    setState(() => _currentZoom = zoom);
+    try {
+      await _controller!.setZoomLevel(targetZoom);
+    } catch (e) {
+      debugPrint('Set zoom error: $e');
     }
   }
 
@@ -1021,7 +1053,7 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
-  // ── Camera preview (aspect-ratio correct, stabilization & real-time filter matrix) ──
+  // ── Camera preview (aspect-ratio correct, pinch-zoom, stabilization & real-time filter matrix) ──
   Widget _buildCameraPreview() {
     final previewSize = _controller!.value.previewSize;
     if (previewSize == null) {
@@ -1062,7 +1094,17 @@ class _CameraScreenState extends State<CameraScreen>
       );
     }
 
-    return preview;
+    // Pinch to Zoom gesture
+    return GestureDetector(
+      onScaleStart: (details) {
+        _baseScale = _currentZoom;
+      },
+      onScaleUpdate: (details) {
+        final newZoom = (_baseScale * details.scale).clamp(_minAvailableZoom, _maxAvailableZoom);
+        _setZoom(newZoom);
+      },
+      child: preview,
+    );
   }
 
   // ── Preview area ──────────────────────────────────────────────────────────────
@@ -1404,10 +1446,18 @@ class _CameraScreenState extends State<CameraScreen>
   Widget _buildBottomControls() {
     return Container(
       color: Colors.black,
-      padding: const EdgeInsets.only(top: 16, bottom: 28),
+      padding: const EdgeInsets.only(top: 8, bottom: 26),
       child: Column(children: [
+        // ── Zoom Selector (0.5x, 1x, 2x, 4x, 10x - Default 1x) ──
+        ZoomSelector(
+          currentZoom: _currentZoom,
+          minZoom: _minAvailableZoom,
+          maxZoom: _maxAvailableZoom,
+          onZoomChanged: _setZoom,
+        ),
+        const SizedBox(height: 10),
         if (!_isRecording) _buildModeSelector(),
-        const SizedBox(height: 20),
+        const SizedBox(height: 18),
         Row(
           mainAxisAlignment: MainAxisAlignment.spaceEvenly,
           crossAxisAlignment: CrossAxisAlignment.center,
