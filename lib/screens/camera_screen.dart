@@ -856,13 +856,14 @@ class _CameraScreenState extends State<CameraScreen>
     final input = src.openRead();
     final output = dest.openWrite();
     try {
+      // pipe() streams chunk-by-chunk and automatically calls close() on the sink
+      // when done, ensuring all data is flushed and committed — do NOT call
+      // flush() or close() again after pipe() or it will throw StateError.
       await input.pipe(output);
-      // pipe() closes the output sink automatically; flush to ensure OS commits
-      await output.flush();
     } catch (e) {
       // Clean up partial destination file on error
       try {
-        await output.close();
+        // output may or may not be closed depending on where the error occurred
         if (dest.existsSync()) dest.deleteSync();
       } catch (_) {}
       rethrow;

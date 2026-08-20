@@ -7,6 +7,11 @@ on:
     branches: [main, master]
   workflow_dispatch:
 
+# Fix: cần quyền write để softprops/action-gh-release tạo được Release.
+# Không có block này → GITHUB_TOKEN chỉ có read → bước tạo Release trả về 403.
+permissions:
+  contents: write
+
 jobs:
   build:
     name: Build Flutter APK
@@ -24,7 +29,7 @@ jobs:
 
       # ── Dùng bản Flutter STABLE MỚI NHẤT (không pin version cũ) ──────────────
       # Lý do: Flutter 3.24.x có bug không đọc đúng flutter.compileSdkVersion
-      # cho các plugin yêu cầu compileSdk 35 (package_info_plus, 
+      # cho các plugin yêu cầu compileSdk 35 (package_info_plus,
       # flutter_plugin_android_lifecycle...). Bug này đã được fix trong các
       # bản Flutter mới hơn → xem: github.com/flutter/flutter/issues/164369
       - name: Set up Flutter (latest stable)
@@ -49,8 +54,23 @@ jobs:
       - name: Install dependencies
         run: flutter pub get
 
+      # Fix: dùng đường dẫn tuyệt đối đến sdkmanager thay vì phụ thuộc PATH
       - name: Accept Android licenses
-        run: yes | sdkmanager --licenses > /dev/null 2>&1 || true
+        run: |
+          yes | "$ANDROID_SDK_ROOT/cmdline-tools/latest/bin/sdkmanager" --licenses > /dev/null 2>&1 || \
+          yes | sdkmanager --licenses > /dev/null 2>&1 || \
+          echo "sdkmanager license step skipped (non-fatal)"
+
+      # Cache Gradle để build nhanh hơn ở những lần sau (~50% thời gian tiết kiệm)
+      - name: Cache Gradle packages
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
 
       - name: Analyze (non-blocking)
         run: flutter analyze --no-fatal-infos
@@ -110,3 +130,4 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+

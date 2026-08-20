@@ -7,10 +7,12 @@ allprojects {
     }
 }
 
-rootProject.buildDir = "../build"
+// Fix: rootProject.buildDir bị xóa hoàn toàn ở Gradle 8.8+
+// Dùng layout.buildDirectory API thay thế.
+rootProject.layout.buildDirectory.set(file("../build"))
 
 subprojects {
-    project.buildDir = "${rootProject.buildDir}/${project.name}"
+    layout.buildDirectory.set(rootProject.layout.buildDirectory.dir(project.name))
 }
 
 subprojects {
@@ -18,5 +20,5 @@ subprojects {
 }
 
 tasks.register("clean", Delete) {
-    delete rootProject.buildDir
+    delete rootProject.layout.buildDirectory
 }
