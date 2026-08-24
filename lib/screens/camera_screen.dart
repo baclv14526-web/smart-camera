@@ -71,8 +71,8 @@ class _CameraScreenState extends State<CameraScreen>
 
   // ── UI state ─────────────────────────────────────────────────────────────────
   bool _isInitializing = true;
-  bool _showSettings = true;
-  bool _showGrid = true;
+  bool _showSettings = false;
+  bool _showGrid = false;
   bool _showFilterBar = false;
   bool _isTakingPhoto = false;
   String? _lastSavedPath;
@@ -1226,23 +1226,20 @@ class _CameraScreenState extends State<CameraScreen>
                       duration: const Duration(milliseconds: 200),
                       padding: const EdgeInsets.all(8),
                       decoration: BoxDecoration(
-                        color: _showSettings
                             ? const Color(0xFFFFD700).withAlpha(45)
-                            : Colors.white.withAlpha(25),
+                        color: const Color(0xFFFFD700).withAlpha(45)
                         shape: BoxShape.circle,
                         border: Border.all(
-                          color: _showSettings ? const Color(0xFFFFD700) : Colors.white38,
+                          color: const Color(0xFFFFD700),
                           width: 1.2,
                         ),
-                        boxShadow: _showSettings
-                            ? [
+                        boxShadow: [
                                 BoxShadow(
                                   color: const Color(0xFFFFD700).withAlpha(90),
                                   blurRadius: 6,
                                   spreadRadius: 1,
                                 )
                               ]
-                            : null,
                       ),
                       child: Icon(
                         Icons.tune,
