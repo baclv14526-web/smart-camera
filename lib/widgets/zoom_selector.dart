@@ -38,7 +38,7 @@ class ZoomSelector extends StatelessWidget {
         mainAxisSize: MainAxisSize.min,
         children: zoomPresets.map((preset) {
           final isSelected = (currentZoom - preset).abs() < 0.15;
-          final isAvailable = preset <= maxZoom && (preset >= minZoom || preset == 0.5);
+          final isAvailable = preset <= maxZoom && preset >= minZoom;
 
           return Padding(
             padding: const EdgeInsets.symmetric(horizontal: 3),

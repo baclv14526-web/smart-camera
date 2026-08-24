@@ -71,8 +71,8 @@ class _CameraScreenState extends State<CameraScreen>
 
   // ── UI state ─────────────────────────────────────────────────────────────────
   bool _isInitializing = true;
-  bool _showSettings = false;
-  bool _showGrid = false;
+  bool _showSettings = true;
+  bool _showGrid = true;
   bool _showFilterBar = false;
   bool _isTakingPhoto = false;
   String? _lastSavedPath;
