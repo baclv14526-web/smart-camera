@@ -1226,7 +1226,7 @@ class _CameraScreenState extends State<CameraScreen>
                       duration: const Duration(milliseconds: 200),
                       padding: const EdgeInsets.all(8),
                       decoration: BoxDecoration(
-                        color: const Color(0xFFFFD700).withAlpha(45)
+                        color: const Color(0xFFFFD700).withAlpha(45),
                         shape: BoxShape.circle,
                         border: Border.all(
                           color: const Color(0xFFFFD700),
