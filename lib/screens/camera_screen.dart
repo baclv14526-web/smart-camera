@@ -1275,7 +1275,6 @@ class _CameraScreenState extends State<CameraScreen>
                         color: _showSettings
                             ? const Color(0xFFFFD700).withAlpha(45)
                             : Colors.white.withAlpha(25),
-                        color: const Color(0xFFFFD700).withAlpha(45)
                         shape: BoxShape.circle,
                         border: Border.all(
                           color: _showSettings ? const Color(0xFFFFD700) : Colors.white38,
@@ -1283,8 +1282,7 @@ class _CameraScreenState extends State<CameraScreen>
                           width: 1.2,
                         ),
                         boxShadow: _showSettings
-                            ? [
-                        boxShadow: [
+                            ?  [
                                 BoxShadow(
                                   color: const Color(0xFFFFD700).withAlpha(90),
                                   blurRadius: 6,
