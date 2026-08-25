@@ -1317,10 +1317,10 @@ class _CameraScreenState extends State<CameraScreen>
     final double sensorW = previewSize.height; // Chiều rộng landscape → trục chiều cao portrait
     final double sensorH = previewSize.width;  // Chiều cao landscape → trục chiều rộng portrait
 
-    Widget preview = OverflowBox(
-      maxWidth: double.infinity,
-      maxHeight: double.infinity,
-      alignment: Alignment.center,
+    // Thử thay thế OverflowBox bằng cách đơn giản hơn để tránh tràn lên topBar
+    Widget preview = SizedBox(
+      width: double.infinity,
+      height: double.infinity,
       child: FittedBox(
         fit: BoxFit.cover, // Lấp đầy màn hình mà không bị méo
         child: SizedBox(
@@ -1383,11 +1383,13 @@ class _CameraScreenState extends State<CameraScreen>
             style: TextStyle(color: Colors.white70)),
       );
     }
-    return Stack(children: [
-      // ── Preview camera: lấp đầy màn hình, giữ tỷ lệ sensor (không méo) ──
-      Positioned.fill(
-        child: _buildCameraPreview(),
-      ),
+    return Stack(
+      clipBehavior: Clip.none, // Không clip để tránh cắt các overlay
+      children: [
+        // ── Preview camera: lấp đầy màn hình, giữ tỷ lệ sensor (không méo) ──
+        Positioned.fill(
+          child: _buildCameraPreview(),
+        ),
 
       // Lưới 9 ô (rule of thirds)
       if (_showGrid) _buildGridOverlay(),
