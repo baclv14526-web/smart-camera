@@ -983,11 +983,27 @@ class _CameraScreenState extends State<CameraScreen>
     return Scaffold(
       backgroundColor: Colors.black,
       body: SafeArea(
-        child: Column(children: [
-          _buildTopBar(), // Thanh điều khiển trên cùng
-          Expanded(child: _buildPreviewArea()), // Khu vực preview camera
-          _buildBottomControls(), // Thanh điều khiển dưới cùng
-        ]),
+        child: Stack(
+          children: [
+            // Preview camera (background layer)
+            Positioned.fill(
+              child: Column(
+                children: [
+                  SizedBox(height: 60), // Spacer cho topBar
+                  Expanded(child: _buildPreviewArea()),
+                  _buildBottomControls(),
+                ],
+              ),
+            ),
+            // TopBar (foreground layer - luôn ở trên cùng)
+            Positioned(
+              top: 0,
+              left: 0,
+              right: 0,
+              child: _buildTopBar(),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -996,7 +1012,7 @@ class _CameraScreenState extends State<CameraScreen>
   /// Hiển thị: Flash, HDR, Filter, Chống rung, Timer quay, và các nút Grid/Settings
   Widget _buildTopBar() {
     return Container(
-      color: Colors.green,
+      color: Colors.back,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
@@ -1322,7 +1338,7 @@ class _CameraScreenState extends State<CameraScreen>
       width: double.infinity,
       height: double.infinity,
       child: FittedBox(
-        fit: BoxFit.contain, // Chứa trong khung để không tràn lên topBar
+        fit: BoxFit.cover, // Chứa trong khung để không tràn lên topBar
         child: SizedBox(
           width: sensorW,
           height: sensorH,

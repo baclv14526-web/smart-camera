@@ -1,20 +1,22 @@
 import 'package:flutter/material.dart';
 
+// Enum định nghĩa các loại bộ lọc camera có sẵn
 enum CameraFilter {
-  none,
-  beauty,
-  vivid,
-  warm,
-  vintage,
-  cinematic,
-  mono,
+  none,       // Không dùng bộ lọc (ảnh gốc)
+  beauty,     // Bộ lọc làm đẹp da
+  vivid,      // Bộ lọc màu tươi tắn
+  warm,       // Bộ lọc màu ấm áp
+  vintage,    // Bộ lọc cổ điển
+  cinematic,  // Bộ lọc điện ảnh
+  mono,       // Bộ lọc đen trắng
 }
 
+// Class chứa thông tin của một bộ lọc
 class FilterInfo {
-  final CameraFilter type;
-  final String label;
-  final IconData icon;
-  final List<double>? matrix;
+  final CameraFilter type;          // Loại bộ lọc
+  final String label;               // Tên hiển thị của bộ lọc
+  final IconData icon;              // Icon đại diện cho bộ lọc
+  final List<double>? matrix;       // Ma trận màu để áp dụng bộ lọc (null = không thay đổi)
 
   const FilterInfo({
     required this.type,
@@ -24,7 +26,9 @@ class FilterInfo {
   });
 }
 
+// Class helper chứa danh sách bộ lọc và các hàm tiện ích
 class FilterHelper {
+  // Danh sách tất cả các bộ lọc có sẵn trong ứng dụng
   static const List<FilterInfo> filters = [
     FilterInfo(
       type: CameraFilter.none,
@@ -106,19 +110,22 @@ class FilterHelper {
     ),
   ];
 
+  // Hàm lấy ma trận màu của một bộ lọc cụ thể
   static List<double>? getMatrix(CameraFilter type) {
     return filters.firstWhere((f) => f.type == type).matrix;
   }
 
+  // Hàm lấy tên hiển thị của một bộ lọc cụ thể
   static String getLabel(CameraFilter type) {
     return filters.firstWhere((f) => f.type == type).label;
   }
 }
 
-/// Horizontal scrolling quick filter bar shown on the camera viewfinder
+/// Thanh bộ lọc cuộn ngang hiển thị nhanh trên màn hình camera
+/// Người dùng có thể vuốt qua trái/phải để chọn bộ lọc
 class FilterCarouselBar extends StatelessWidget {
-  final CameraFilter selected;
-  final ValueChanged<CameraFilter> onSelected;
+  final CameraFilter selected;                   // Bộ lọc đang được chọn
+  final ValueChanged<CameraFilter> onSelected;   // Callback khi người dùng chọn bộ lọc mới
 
   const FilterCarouselBar({
     super.key,
@@ -132,30 +139,30 @@ class FilterCarouselBar extends StatelessWidget {
       height: 48,
       padding: const EdgeInsets.symmetric(vertical: 4),
       decoration: BoxDecoration(
-        color: Colors.black.withAlpha(160),
-        borderRadius: BorderRadius.circular(24),
+        color: Colors.black.withAlpha(160),      // Nền đen trong suốt
+        borderRadius: BorderRadius.circular(24),  // Bo tròn góc
         border: Border.all(color: Colors.white12, width: 1),
       ),
       child: ListView.builder(
-        scrollDirection: Axis.horizontal,
-        physics: const BouncingScrollPhysics(),
+        scrollDirection: Axis.horizontal,          // Cuộn ngang
+        physics: const BouncingScrollPhysics(),   // Hiệu ứng nảy khi cuộn
         padding: const EdgeInsets.symmetric(horizontal: 8),
-        itemCount: FilterHelper.filters.length,
+        itemCount: FilterHelper.filters.length,   // Số lượng bộ lọc
         itemBuilder: (context, index) {
           final filter = FilterHelper.filters[index];
-          final isSelected = filter.type == selected;
+          final isSelected = filter.type == selected;  // Kiểm tra xem có phải bộ lọc đang chọn không
 
           return Padding(
             padding: const EdgeInsets.symmetric(horizontal: 4),
             child: GestureDetector(
-              onTap: () => onSelected(filter.type),
+              onTap: () => onSelected(filter.type),    // Gọi callback khi tap vào bộ lọc
               child: AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
+                duration: const Duration(milliseconds: 180),  // Thời gian animation
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
                 decoration: BoxDecoration(
                   color: isSelected
-                      ? const Color(0xFFFFD700)
-                      : const Color(0xFF2C2C2E),
+                      ? const Color(0xFFFFD700)      // Màu vàng khi được chọn
+                      : const Color(0xFF2C2C2E),     // Màu xám đậm khi chưa chọn
                   borderRadius: BorderRadius.circular(20),
                   border: Border.all(
                     color: isSelected ? const Color(0xFFFFD700) : const Color(0xFF3E3E42),
@@ -164,7 +171,7 @@ class FilterCarouselBar extends StatelessWidget {
                   boxShadow: isSelected
                       ? [
                           BoxShadow(
-                            color: const Color(0xFFFFD700).withAlpha(80),
+                            color: const Color(0xFFFFD700).withAlpha(80),  // Hiệu ứng phát sáng khi được chọn
                             blurRadius: 8,
                             offset: const Offset(0, 2),
                           ),
@@ -199,10 +206,11 @@ class FilterCarouselBar extends StatelessWidget {
   }
 }
 
-/// Filter selector widget embedded inside Settings Panel
+/// Widget chọn bộ lọc hiển thị trong bảng cài đặt (Settings Panel)
+/// Hiển thị các bộ lọc dạng lưới thay vì thanh cuộn ngang
 class FilterSettingsSelector extends StatelessWidget {
-  final CameraFilter selected;
-  final ValueChanged<CameraFilter> onChanged;
+  final CameraFilter selected;                 // Bộ lọc đang được chọn
+  final ValueChanged<CameraFilter> onChanged;  // Callback khi người dùng thay đổi bộ lọc
 
   const FilterSettingsSelector({
     super.key,
@@ -215,6 +223,7 @@ class FilterSettingsSelector extends StatelessWidget {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
+        // Tiêu đề section với icon
         const Row(
           children: [
             Icon(Icons.auto_awesome, size: 16, color: Color(0xFFFFD700)),
@@ -231,18 +240,21 @@ class FilterSettingsSelector extends StatelessWidget {
           ],
         ),
         const SizedBox(height: 10),
+        // Wrap widget để hiển thị các bộ lọc dạng lưới (tự động xuống dòng khi hết chỗ)
         Wrap(
-          spacing: 8,
-          runSpacing: 8,
+          spacing: 8,        // Khoảng cách giữa các bộ lọc theo chiều ngang
+          runSpacing: 8,    // Khoảng cách giữa các dòng
           children: FilterHelper.filters.map((filter) {
-            final isSelected = filter.type == selected;
+            final isSelected = filter.type == selected;  // Kiểm tra xem có phải bộ lọc đang chọn không
             return GestureDetector(
-              onTap: () => onChanged(filter.type),
+              onTap: () => onChanged(filter.type),  // Gọi callback khi tap vào bộ lọc
               child: AnimatedContainer(
-                duration: const Duration(milliseconds: 180),
+                duration: const Duration(milliseconds: 180),  // Thời gian animation
                 padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                 decoration: BoxDecoration(
-                  color: isSelected ? const Color(0xFFFFD700) : const Color(0xFF2C2C2E),
+                  color: isSelected
+                      ? const Color(0xFFFFD700)      // Màu vàng khi được chọn
+                      : const Color(0xFF2C2C2E),     // Màu xám đậm khi chưa chọn
                   borderRadius: BorderRadius.circular(16),
                   border: Border.all(
                     color: isSelected ? const Color(0xFFFFD700) : const Color(0xFF444446),
@@ -251,7 +263,7 @@ class FilterSettingsSelector extends StatelessWidget {
                   boxShadow: isSelected
                       ? [
                           BoxShadow(
-                            color: const Color(0xFFFFD700).withAlpha(80),
+                            color: const Color(0xFFFFD700).withAlpha(80),  // Hiệu ứng phát sáng khi được chọn
                             blurRadius: 8,
                             offset: const Offset(0, 2),
                           ),
