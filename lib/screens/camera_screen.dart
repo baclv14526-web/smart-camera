@@ -1,156 +1,164 @@
-import 'dart:async';
-import 'dart:io';
-import 'dart:ui' as ui;
-import 'package:flutter/material.dart';
-import 'package:camera/camera.dart';
-import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as path;
-import 'package:permission_handler/permission_handler.dart';
-import 'package:wakelock_plus/wakelock_plus.dart';
-import '../widgets/timer_selector.dart';
-import '../widgets/quality_selector.dart';
-import '../widgets/storage_selector.dart';
-import '../widgets/timestamp_selector.dart';
-import '../widgets/hdr_selector.dart';
-import '../widgets/filter_selector.dart';
-import '../widgets/stabilization_selector.dart';
-import '../widgets/zoom_selector.dart';
-import 'preview_screen.dart';
+// Import các thư viện cần thiết
+import 'dart:async'; // Xử lý async/await và Timer
+import 'dart:io'; // Xử lý file và directory
+import 'dart:ui' as ui; // Xử lý ảnh và canvas
+import 'package:flutter/material.dart'; // UI Flutter
+import 'package:camera/camera.dart'; // Camera Flutter
+import 'package:path_provider/path_provider.dart'; // Lấy đường dẫn thư mục hệ thống
+import 'package:path/path.dart' as path; // Xử lý đường dẫn file
+import 'package:permission_handler/permission_handler.dart'; // Yêu cầu quyền truy cập
+import 'package:wakelock_plus/wakelock_plus.dart'; // Giữ màn hình không tắt
+import '../widgets/timer_selector.dart'; // Widget chọn timer
+import '../widgets/quality_selector.dart'; // Widget chọn chất lượng
+import '../widgets/storage_selector.dart'; // Widget chọn bộ nhớ
+import '../widgets/timestamp_selector.dart'; // Widget chọn timestamp
+import '../widgets/hdr_selector.dart'; // Widget chọn HDR
+import '../widgets/filter_selector.dart'; // Widget chọn filter
+import '../widgets/stabilization_selector.dart'; // Widget chọn chống rung
+import '../widgets/zoom_selector.dart'; // Widget chọn zoom
+import 'preview_screen.dart'; // Màn hình xem ảnh/video
 
+// Enum chế độ camera: chụp ảnh hoặc quay video
 enum CameraMode { photo, video }
 
+// Widget chính của màn hình camera
 class CameraScreen extends StatefulWidget {
-  final List<CameraDescription> cameras;
+  final List<CameraDescription> cameras; // Danh sách camera có sẵn trên thiết bị
   const CameraScreen({super.key, required this.cameras});
 
   @override
   State<CameraScreen> createState() => _CameraScreenState();
 }
 
+// State của màn hình camera, theo dõi lifecycle của app
 class _CameraScreenState extends State<CameraScreen>
     with WidgetsBindingObserver {
-  // ── Controller ──────────────────────────────────────────────────────────────
-  CameraController? _controller;
-  int _cameraIndex = 0;
-  ResolutionPreset _resolution = ResolutionPreset.veryHigh;
+  // ── Controller & Camera ──────────────────────────────────────────────────────────────
+  CameraController? _controller; // Controller điều khiển camera
+  int _cameraIndex = 0; // Index của camera đang dùng (0: sau, 1: trước)
+  ResolutionPreset _resolution = ResolutionPreset.veryHigh; // Chất lượng camera
 
-  // ── Mode ────────────────────────────────────────────────────────────────────
-  CameraMode _mode = CameraMode.photo;
+  // ── Chế độ hoạt động ────────────────────────────────────────────────────────────────────
+  CameraMode _mode = CameraMode.photo; // Chế độ: chụp ảnh hoặc quay video
 
-  // ── Zoom (0.5x, 1x, 2x, 4x, 10x - Default 1x) ──────────────────────────────
-  double _currentZoom = 1.0;
-  double _minAvailableZoom = 1.0;
-  double _maxAvailableZoom = 10.0;
-  double _baseScale = 1.0;
+  // ── Zoom (0.5x, 1x, 2x, 4x, 10x - Mặc định 1x) ──────────────────────────────
+  double _currentZoom = 1.0; // Mức zoom hiện tại
+  double _minAvailableZoom = 1.0; // Zoom tối thiểu do hardware hỗ trợ
+  double _maxAvailableZoom = 10.0; // Zoom tối đa (giới hạn ở 10x)
+  double _baseScale = 1.0; // Scale cơ bản cho gesture pinch zoom
 
-  // ── Photo timer ─────────────────────────────────────────────────────────────
-  final List<String> _photoTimerOptions = ['Tắt', '3s', '5s', '10s', '15s'];
-  String _selectedPhotoTimer = 'Tắt';
-  Timer? _photoCountdownTimer;
-  int _photoCountdown = 0;
-  bool _isPhotoCountingDown = false;
+  // ── Timer chụp ảnh ─────────────────────────────────────────────────────────────
+  final List<String> _photoTimerOptions = ['Tắt', '3s', '5s', '10s', '15s']; // Các tùy chọn timer
+  String _selectedPhotoTimer = 'Tắt'; // Timer đang chọn
+  Timer? _photoCountdownTimer; // Timer đếm ngược
+  int _photoCountdown = 0; // Số giây đếm ngược
+  bool _isPhotoCountingDown = false; // Đang đếm ngược hay không
 
-  // ── Burst / continuous shooting ──────────────────────────────────────────────
-  final List<int> _burstOptions = [0, 3, 5, 7, 9, 15]; // 0 = off
-  int _burstCount = 0; // number of frames; 0 means disabled
-  bool _isBursting = false;
-  int _burstProgress = 0; // frames captured so far
-  int _burstTotal = 0;    // frames requested for current burst
+  // ── Chụp liên tiếp (Burst mode) ──────────────────────────────────────────────
+  final List<int> _burstOptions = [0, 3, 5, 7, 9, 15]; // Số tấm chụp liên tiếp (0 = tắt)
+  int _burstCount = 0; // Số tấm đã chọn (0 = tắt)
+  bool _isBursting = false; // Đang chụp liên tiếp hay không
+  int _burstProgress = 0; // Số tấm đã chụp trong burst hiện tại
+  int _burstTotal = 0;    // Tổng số tấm cần chụp trong burst hiện tại
 
-  // ── Video duration ───────────────────────────────────────────────────────────
+  // ── Thời lượng quay video ───────────────────────────────────────────────────────────
   final List<String> _videoDurationOptions = [
     'Tắt', '15s', '30s', '1 phút', '3 phút', '5 phút', '10 phút',
   ];
-  String _selectedVideoDuration = 'Tắt';
+  String _selectedVideoDuration = 'Tắt'; // Thời lượng tự động dừng quay
 
-  // ── Recording state ──────────────────────────────────────────────────────────
-  bool _isRecording = false;
-  int _recordingElapsed = 0;
-  Timer? _recordingTimer;
-  Timer? _autoStopTimer;
+  // ── Trạng thái quay video ──────────────────────────────────────────────────────────
+  bool _isRecording = false; // Đang quay video hay không
+  int _recordingElapsed = 0; // Số giây đã quay
+  Timer? _recordingTimer; // Timer đếm thời gian quay
+  Timer? _autoStopTimer; // Timer tự động dừng quay
 
-  // ── UI state ─────────────────────────────────────────────────────────────────
-  bool _isInitializing = true;
-  bool _showSettings = false;
-  bool _showGrid = false;
-  bool _showFilterBar = false;
-  bool _isTakingPhoto = false;
-  String? _lastSavedPath;
-  bool _lastSavedIsVideo = false;
+  // ── Trạng thái UI ─────────────────────────────────────────────────────────────────
+  bool _isInitializing = true; // Đang khởi tạo camera hay không
+  bool _showSettings = false; // Hiển thị panel cài đặt hay không
+  bool _showGrid = false; // Hiển thị lưới 9 ô hay không
+  bool _showFilterBar = false; // Hiển thị thanh filter hay không
+  bool _isTakingPhoto = false; // Đang chụp ảnh hay không
+  String? _lastSavedPath; // Đường dẫn file ảnh/video gần nhất
+  bool _lastSavedIsVideo = false; // File gần nhất là video hay ảnh
 
-  // ── Beauty & Color Filters ───────────────────────────────────────────────────
-  CameraFilter _selectedFilter = CameraFilter.none;
+  // ── Filter màu & Làm đẹp ───────────────────────────────────────────────────
+  CameraFilter _selectedFilter = CameraFilter.none; // Filter đang chọn
 
-  // ── Image Stabilization (OIS / EIS / Super Steady) ───────────────────────────
-  StabilizationMode _stabilizationMode = StabilizationMode.standard;
+  // ── Chống rung (OIS / EIS / Super Steady) ───────────────────────────
+  StabilizationMode _stabilizationMode = StabilizationMode.standard; // Chế độ chống rung
 
-  // ── Storage location ──────────────────────────────────────────────────────────
-  StorageLocation _storageLocation = StorageLocation.phone;
-  bool _sdcardAvailable = false;
-  String? _sdcardAppPath;
-  String? _sdcardRootPath;
+  // ── Vị trí lưu file ──────────────────────────────────────────────────────────
+  StorageLocation _storageLocation = StorageLocation.phone; // Lưu vào điện thoại hay SD card
+  bool _sdcardAvailable = false; // Có thẻ SD hay không
+  String? _sdcardAppPath; // Đường dẫn app trên SD card
+  String? _sdcardRootPath; // Đường dẫn gốc SD card
 
   // ── Timestamp watermark ───────────────────────────────────────────────────────
-  bool _showTimestamp = true;
+  bool _showTimestamp = true; // Hiển thị timestamp trên ảnh hay không
 
-  // ── HDR Mode ─────────────────────────────────────────────────────────────────
-  HdrMode _hdrMode = HdrMode.auto;
+  // ── Chế độ HDR ─────────────────────────────────────────────────────────────────
+  HdrMode _hdrMode = HdrMode.auto; // Chế độ HDR (tắt, bật, auto)
 
-  // ── Mirror / Selfie Flip (front camera) ─────────────────────────────────────
+  // ── Lật ảnh selfie (camera trước) ─────────────────────────────────────
   /// Lật ảnh ngang khi dùng camera trước. Mặc định bật khi chụp bằng camera trước.
   bool _mirrorFrontCamera = true;
 
-  // Helper: is current camera the front (selfie) camera?
+  // Helper: Kiểm tra camera hiện tại có phải camera trước (selfie) không?
   bool get _isFrontCamera =>
       widget.cameras.isNotEmpty &&
       _cameraIndex < widget.cameras.length &&
       widget.cameras[_cameraIndex].lensDirection == CameraLensDirection.front;
 
   // ── Flash ────────────────────────────────────────────────────────────────────
-  FlashMode _flashMode = FlashMode.off;
+  FlashMode _flashMode = FlashMode.off; // Chế độ flash (tắt, auto, luôn, torch)
 
+  // ── Lifecycle methods ────────────────────────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
-    WidgetsBinding.instance.addObserver(this);
-    _requestPermissions();
-    _detectSdCard();
+    WidgetsBinding.instance.addObserver(this); // Đăng ký observer để theo dõi lifecycle
+    _requestPermissions(); // Yêu cầu quyền truy cập camera, microphone, storage
+    _detectSdCard(); // Phát hiện thẻ SD card
   }
 
   @override
   void dispose() {
-    WidgetsBinding.instance.removeObserver(this);
-    _photoCountdownTimer?.cancel();
-    _recordingTimer?.cancel();
-    _autoStopTimer?.cancel();
-    _controller?.dispose();
-    WakelockPlus.disable();
+    WidgetsBinding.instance.removeObserver(this); // Hủy đăng ký observer
+    _photoCountdownTimer?.cancel(); // Hủy timer đếm ngược
+    _recordingTimer?.cancel(); // Hủy timer đếm thời gian quay
+    _autoStopTimer?.cancel(); // Hủy timer tự động dừng
+    _controller?.dispose(); // Giải phóng camera controller
+    WakelockPlus.disable(); // Tắt chế độ giữ màn hình
     super.dispose();
   }
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // Xử lý khi app chuyển trạng thái (background/foreground)
     if (_controller == null || !_controller!.value.isInitialized) return;
     if (state == AppLifecycleState.inactive) {
-      _controller?.dispose();
+      _controller?.dispose(); // Khi app vào background, giải phóng camera
     } else if (state == AppLifecycleState.resumed) {
-      _initCamera();
+      _initCamera(); // Khi app trở lại foreground, khởi tạo lại camera
     }
   }
 
-  // ── SD Card detection ────────────────────────────────────────────────────────
+  // ── Phát hiện thẻ SD Card ────────────────────────────────────────────────────────
+  /// Quét các đường dẫn mount để tìm thẻ SD card vật lý
   Future<void> _detectSdCard() async {
-    if (!Platform.isAndroid) return;
+    if (!Platform.isAndroid) return; // Chỉ Android mới có SD card
     try {
-      final sdRoots = <String>{};
+      final sdRoots = <String>{}; // Set lưu các đường dẫn SD card tìm được
 
-      // 1. Direct /storage mount points scan (finds real physical SD cards)
+      // 1. Quét trực tiếp thư mục /storage (tìm thẻ SD vật lý thật)
       try {
         final storageDir = Directory('/storage');
         if (storageDir.existsSync()) {
           for (final entity in storageDir.listSync()) {
             if (entity is Directory) {
               final name = path.basename(entity.path);
+              // Loại trừ các đường dẫn ảo (emulated, self, knox, container)
               if (name != 'emulated' &&
                   name != 'self' &&
                   name != 'knox' &&
@@ -170,6 +178,7 @@ class _CameraScreenState extends State<CameraScreen>
         final picDirs = await getExternalStorageDirectories(type: StorageDirectory.pictures);
         if (picDirs != null) {
           for (final dir in picDirs) {
+            // Chỉ lấy thư mục không nằm trong /emulated/0 (bộ nhớ trong)
             if (!dir.path.contains('/emulated/0')) {
               _sdcardAppPath = dir.path;
               final root = dir.path.split('Android').first;
@@ -184,7 +193,7 @@ class _CameraScreenState extends State<CameraScreen>
       try {
         final rawDirs = await getExternalStorageDirectories();
         if (rawDirs != null && rawDirs.length > 1) {
-          final sdDir = rawDirs[1];
+          final sdDir = rawDirs[1]; // Thư mục thứ 2 thường là SD card
           _sdcardAppPath ??= sdDir.path;
           final root = sdDir.path.split('Android').first;
           if (root.isNotEmpty) {
@@ -193,6 +202,7 @@ class _CameraScreenState extends State<CameraScreen>
         }
       } catch (_) {}
 
+      // Nếu tìm thấy SD card
       if (sdRoots.isNotEmpty) {
         _sdcardRootPath = sdRoots.first;
         setState(() {
@@ -205,34 +215,36 @@ class _CameraScreenState extends State<CameraScreen>
       debugPrint('SD Card detection error: $e');
     }
 
+    // Không tìm thấy SD card
     setState(() {
       _sdcardAvailable = false;
       _sdcardAppPath = null;
       _sdcardRootPath = null;
-      // Fall back to phone if SD was previously selected
+      // Nếu trước đó đang chọn SD card, chuyển về bộ nhớ trong
       if (_storageLocation == StorageLocation.sdcard) {
         _storageLocation = StorageLocation.phone;
       }
     });
   }
 
-  // ── Permissions ──────────────────────────────────────────────────────────────
+  // ── Yêu cầu quyền truy cập ──────────────────────────────────────────────────────────────
+  /// Yêu cầu các quyền cần thiết: camera, microphone, storage, photos, videos, manage external storage
   Future<void> _requestPermissions() async {
     await [
-      Permission.camera,
-      Permission.microphone,
-      Permission.storage,
-      Permission.photos,
-      Permission.videos,
-      Permission.manageExternalStorage,
+      Permission.camera, // Quyền camera
+      Permission.microphone, // Quyền microphone (cho video)
+      Permission.storage, // Quyền truy cập storage
+      Permission.photos, // Quyền truy cập ảnh
+      Permission.videos, // Quyền truy cập video
+      Permission.manageExternalStorage, // Quyền quản lý storage bên ngoài (Android 11+)
     ].request();
 
     final camOk = await Permission.camera.isGranted;
     final micOk = await Permission.microphone.isGranted;
 
     if (camOk && micOk) {
-      _initCamera();
-      _detectSdCard();
+      _initCamera(); // Nếu có đủ quyền, khởi tạo camera
+      _detectSdCard(); // Phát hiện SD card
     } else {
       setState(() => _isInitializing = false);
       if (mounted) {
@@ -241,33 +253,34 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  // ── Init camera ───────────────────────────────────────────────────────────────
+  // ── Khởi tạo camera ───────────────────────────────────────────────────────────────
+  /// Khởi tạo camera controller với các thông số và khả năng zoom
   Future<void> _initCamera() async {
     if (widget.cameras.isEmpty) {
       setState(() => _isInitializing = false);
       return;
     }
-    await _controller?.dispose();
+    await _controller?.dispose(); // Giải phóng controller cũ nếu có
 
     final controller = CameraController(
-      widget.cameras[_cameraIndex],
-      _resolution,
-      enableAudio: true,
-      imageFormatGroup: ImageFormatGroup.jpeg,
+      widget.cameras[_cameraIndex], // Camera đang chọn
+      _resolution, // Chất lượng video/ảnh
+      enableAudio: true, // Bật âm thanh cho video
+      imageFormatGroup: ImageFormatGroup.jpeg, // Định dạng ảnh JPEG
     );
     _controller = controller;
 
     try {
-      await controller.initialize();
-      await controller.setFlashMode(_flashMode);
+      await controller.initialize(); // Khởi tạo camera
+      await controller.setFlashMode(_flashMode); // Đặt chế độ flash
 
-      // Query hardware zoom capabilities (Default 1x)
+      // Query khả năng zoom của hardware (Mặc định 1x)
       try {
-        final minZ = await controller.getMinZoomLevel();
-        final maxZ = await controller.getMaxZoomLevel();
+        final minZ = await controller.getMinZoomLevel(); // Zoom tối thiểu hardware
+        final maxZ = await controller.getMaxZoomLevel(); // Zoom tối đa hardware
         _minAvailableZoom = minZ;
-        _maxAvailableZoom = maxZ.clamp(1.0, 10.0);
-        _currentZoom = 1.0.clamp(minZ, _maxAvailableZoom);
+        _maxAvailableZoom = maxZ.clamp(1.0, 10.0); // Giới hạn tối đa 10x
+        _currentZoom = 1.0.clamp(minZ, _maxAvailableZoom); // Reset về 1x
         await controller.setZoomLevel(_currentZoom);
       } catch (e) {
         debugPrint('Zoom level query error: $e');
@@ -280,88 +293,96 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  // ── Set Zoom Level (0.5x, 1x, 2x, 4x, 10x) ──────────────────────────────────
+  // ── Đặt mức zoom (0.5x, 1x, 2x, 4x, 10x) ──────────────────────────────────
+  /// Thay đổi mức zoom, clamp trong khoảng cho phép
   Future<void> _setZoom(double zoom) async {
     if (_controller == null || !_controller!.value.isInitialized) return;
-    final targetZoom = zoom.clamp(_minAvailableZoom, _maxAvailableZoom);
+    final targetZoom = zoom.clamp(_minAvailableZoom, _maxAvailableZoom); // Giới hạn zoom
     setState(() => _currentZoom = zoom);
     try {
-      await _controller!.setZoomLevel(targetZoom);
+      await _controller!.setZoomLevel(targetZoom); // Áp dụng zoom
     } catch (e) {
       debugPrint('Set zoom error: $e');
     }
   }
 
-  // ── Switch camera ─────────────────────────────────────────────────────────────
+  // ── Chuyển camera (trước/sau) ─────────────────────────────────────────────────────────────
+  /// Chuyển giữa camera sau và camera trước
   Future<void> _switchCamera() async {
-    if (widget.cameras.length < 2) return;
-    final nextIndex = _cameraIndex == 0 ? 1 : 0;
+    if (widget.cameras.length < 2) return; // Cần ít nhất 2 camera
+    final nextIndex = _cameraIndex == 0 ? 1 : 0; // Toggle index
     final nextIsFront = nextIndex < widget.cameras.length &&
         widget.cameras[nextIndex].lensDirection == CameraLensDirection.front;
     setState(() {
       _cameraIndex = nextIndex;
       _isInitializing = true;
-      // Auto-enable mirror when switching to front camera
+      // Tự động bật lật ảnh khi chuyển sang camera trước
       if (nextIsFront) _mirrorFrontCamera = true;
     });
-    await _initCamera();
+    await _initCamera(); // Khởi tạo lại camera mới
   }
 
-  // ── HDR toggle helper ────────────────────────────────────────────────────────
+  // ── Chuyển chế độ HDR ────────────────────────────────────────────────────────
+  /// Toggle giữa 3 chế độ: Auto → On → Off → Auto
   void _cycleHdrMode() {
     setState(() {
       switch (_hdrMode) {
         case HdrMode.auto:
-          _hdrMode = HdrMode.on;
+          _hdrMode = HdrMode.on; // Chuyển sang HDR bật
           break;
         case HdrMode.on:
-          _hdrMode = HdrMode.off;
+          _hdrMode = HdrMode.off; // Chuyển sang HDR tắt
           break;
         case HdrMode.off:
-          _hdrMode = HdrMode.auto;
+          _hdrMode = HdrMode.auto; // Chuyển sang HDR auto
           break;
       }
     });
   }
 
-  // ── Stabilization Mode (OIS / EIS / Super Steady) ─────────────────────────
+  // ── Chuyển chế độ chống rung (OIS / EIS / Super Steady) ─────────────────────────
+  /// Toggle giữa 3 chế độ: Off → Standard → Super Steady → Off
   void _cycleStabilizationMode() {
     setState(() {
       switch (_stabilizationMode) {
         case StabilizationMode.off:
-          _stabilizationMode = StabilizationMode.standard;
+          _stabilizationMode = StabilizationMode.standard; // Bật OIS chuẩn
           break;
         case StabilizationMode.standard:
-          _stabilizationMode = StabilizationMode.superSteady;
+          _stabilizationMode = StabilizationMode.superSteady; // Bật Super Steady
           break;
         case StabilizationMode.superSteady:
-          _stabilizationMode = StabilizationMode.off;
+          _stabilizationMode = StabilizationMode.off; // Tắt chống rung
           break;
       }
     });
-    _applyStabilization();
+    _applyStabilization(); // Áp dụng chế độ mới
   }
 
+  /// Áp dụng chế độ chống rung lên camera
   Future<void> _applyStabilization() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
     try {
       if (_stabilizationMode != StabilizationMode.off) {
-        await _controller!.setFocusMode(FocusMode.auto);
-        await _controller!.setExposureMode(ExposureMode.auto);
+        await _controller!.setFocusMode(FocusMode.auto); // Tự động lấy nét
+        await _controller!.setExposureMode(ExposureMode.auto); // Tự động phơi sáng
       }
     } catch (e) {
       debugPrint('Stabilization apply error: $e');
     }
   }
 
-  // ── Flash ─────────────────────────────────────────────────────────────────────
+  // ── Chuyển chế độ Flash ─────────────────────────────────────────────────────────────
+  /// Toggle flash: chụp ảnh (off → auto → always), video (off → torch)
   void _toggleFlash() {
     if (_mode == CameraMode.photo) {
+      // Chế độ chụp ảnh: Tắt → Auto → Luôn bật → Tắt
       final modes = [FlashMode.off, FlashMode.auto, FlashMode.always];
       final next = modes[(modes.indexOf(_flashMode) + 1) % modes.length];
       setState(() => _flashMode = next);
       _controller?.setFlashMode(next);
     } else {
+      // Chế độ video: Tắt → Torch (đèn pin) → Tắt
       final next = _flashMode == FlashMode.torch || _flashMode == FlashMode.always
           ? FlashMode.off
           : FlashMode.torch;
@@ -370,71 +391,78 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  /// Lấy icon tương ứng với chế độ flash hiện tại
   IconData get _flashIcon {
     switch (_flashMode) {
       case FlashMode.always:
       case FlashMode.torch:
-        return Icons.flash_on;
+        return Icons.flash_on; // Icon flash bật
       case FlashMode.auto:
-        return Icons.flash_auto;
+        return Icons.flash_auto; // Icon flash auto
       default:
-        return Icons.flash_off;
+        return Icons.flash_off; // Icon flash tắt
     }
   }
 
-  // ── Duration helpers ──────────────────────────────────────────────────────────
+  // ── Helper chuyển đổi thời gian ──────────────────────────────────────────────────────────
+  /// Chuyển chuỗi timer thành số giây
   int _photoTimerSeconds(String s) =>
       {'3s': 3, '5s': 5, '10s': 10, '15s': 15}[s] ?? 0;
 
+  /// Chuyển chuỗi thời lượng video thành số giây
   int _videoDurationSeconds(String s) =>
       {'15s': 15, '30s': 30, '1 phút': 60, '3 phút': 180, '5 phút': 300, '10 phút': 600}[s] ?? 0;
 
+  /// Format số giây thành dạng MM:SS
   String _formatDuration(int s) =>
       '${(s ~/ 60).toString().padLeft(2, '0')}:${(s % 60).toString().padLeft(2, '0')}';
 
-  // ── Save directory ────────────────────────────────────────────────────────────
+  // ── Lấy thư mục lưu file ────────────────────────────────────────────────────────────
+  /// Tìm và xác thực thư mục có thể ghi file (ưu tiên SD card nếu được chọn)
   Future<String> _getSaveDir(bool isVideo) async {
-    const appFolder = 'CameraApp2026';
-    final mediaTypeFolder = isVideo ? 'Movies' : 'Pictures';
+    const appFolder = 'CameraApp2026'; // Tên thư mục app
+    final mediaTypeFolder = isVideo ? 'Movies' : 'Pictures'; // Thư mục theo loại media
 
     if (Platform.isAndroid) {
-      // ── 1. If MicroSD Card is selected ──
+      // ── 1. Nếu chọn thẻ SD Card ──
       if (_storageLocation == StorageLocation.sdcard) {
         final sdCandidates = <String>[];
 
-        // Public folders on SD Card (DCIM / Pictures / Movies / CameraApp2026)
+        // Thư mục công khai trên SD Card (DCIM / Pictures / Movies / CameraApp2026)
         if (_sdcardRootPath != null) {
           sdCandidates.add(path.join(_sdcardRootPath!, 'DCIM', appFolder));
           sdCandidates.add(path.join(_sdcardRootPath!, mediaTypeFolder, appFolder));
           sdCandidates.add(path.join(_sdcardRootPath!, appFolder));
         }
 
-        // App-specific folder on SD Card (guaranteed write access on Android 10+)
+        // Thư mục app-specific trên SD Card (đảm bảo quyền ghi trên Android 10+)
         if (_sdcardAppPath != null) {
           sdCandidates.add(path.join(_sdcardAppPath!, appFolder));
           sdCandidates.add(path.join(_sdcardAppPath!, mediaTypeFolder, appFolder));
           sdCandidates.add(_sdcardAppPath!);
         }
 
-        // Package specific paths on SD
+        // Đường dẫn package-specific trên SD
         if (_sdcardRootPath != null) {
           sdCandidates.add(path.join(_sdcardRootPath!, 'Android', 'data', 'com.example.camera_app', 'files', appFolder));
           sdCandidates.add(path.join(_sdcardRootPath!, 'Android', 'media', 'com.example.camera_app', appFolder));
         }
 
+        // Test từng đường dẫn xem có thể ghi được không
         for (final candidate in sdCandidates) {
           try {
             final dir = Directory(candidate);
             if (!dir.existsSync()) {
-              dir.createSync(recursive: true);
+              dir.createSync(recursive: true); // Tạo thư mục nếu chưa có
             }
+            // Test ghi file
             final testFile = File(path.join(dir.path, '.test_${DateTime.now().millisecondsSinceEpoch}'));
             testFile.writeAsStringSync('ok');
             if (testFile.existsSync()) {
-              testFile.deleteSync();
+              testFile.deleteSync(); // Xóa file test
             }
             debugPrint('Valid writable SD card directory: ${dir.path}');
-            return dir.path;
+            return dir.path; // Trả về đường dẫn hợp lệ đầu tiên
           } catch (e) {
             debugPrint('SD write candidate $candidate rejected: $e');
           }
@@ -442,7 +470,7 @@ class _CameraScreenState extends State<CameraScreen>
         debugPrint('SD card write candidates rejected, falling back to phone storage');
       }
 
-      // ── 2. Internal Phone Storage ──
+      // ── 2. Bộ nhớ trong điện thoại ──
       final phoneCandidates = <String>[
         '/storage/emulated/0/DCIM/$appFolder',
         '/storage/emulated/0/$mediaTypeFolder/$appFolder',
@@ -459,6 +487,7 @@ class _CameraScreenState extends State<CameraScreen>
         }
       } catch (_) {}
 
+      // Test từng đường dẫn bộ nhớ trong
       for (final candidate in phoneCandidates) {
         try {
           final dir = Directory(candidate);
@@ -478,7 +507,7 @@ class _CameraScreenState extends State<CameraScreen>
       }
     }
 
-    // ── 3. Fallback: Application Documents Directory ──
+    // ── 3. Fallback: Thư mục Documents của App ──
     final appDocDir = await getApplicationDocumentsDirectory();
     final fallbackDir = Directory(path.join(appDocDir.path, appFolder));
     if (!fallbackDir.existsSync()) {
@@ -487,26 +516,29 @@ class _CameraScreenState extends State<CameraScreen>
     return fallbackDir.path;
   }
 
-  // ── Photo capture ─────────────────────────────────────────────────────────────
+  // ── Xử lý chụp ảnh ─────────────────────────────────────────────────────────────
+  /// Xử lý khi người dùng nhấn nút chụp: timer, burst, hoặc chụp đơn
   Future<void> _handleCapture() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
-    if (_isBursting) return; // ignore taps during burst
+    if (_isBursting) return; // Bỏ qua nếu đang chụp liên tiếp
     if (_isPhotoCountingDown) {
-      _cancelPhotoCountdown();
+      _cancelPhotoCountdown(); // Hủy đếm ngược nếu đang chạy
       return;
     }
-    final delay = _photoTimerSeconds(_selectedPhotoTimer);
+    final delay = _photoTimerSeconds(_selectedPhotoTimer); // Lấy thời gian timer
     if (delay == 0) {
+      // Không có timer
       if (_burstCount > 0) {
-        await _takeBurstPhotos(_burstCount);
+        await _takeBurstPhotos(_burstCount); // Chụp liên tiếp
       } else {
-        await _takePhoto();
+        await _takePhoto(); // Chụp đơn
       }
     } else {
-      _startPhotoCountdown(delay);
+      _startPhotoCountdown(delay); // Bắt đầu đếm ngược
     }
   }
 
+  /// Bắt đầu đếm ngược trước khi chụp
   void _startPhotoCountdown(int seconds) {
     setState(() {
       _photoCountdown = seconds;
@@ -516,106 +548,110 @@ class _CameraScreenState extends State<CameraScreen>
       if (_photoCountdown <= 1) {
         t.cancel();
         setState(() { _photoCountdown = 0; _isPhotoCountingDown = false; });
+        // Đếm ngược xong, thực hiện chụp
         if (_burstCount > 0) {
           _takeBurstPhotos(_burstCount);
         } else {
           _takePhoto();
         }
       } else {
-        setState(() => _photoCountdown--);
+        setState(() => _photoCountdown--); // Giảm đếm
       }
     });
   }
 
+  /// Hủy đếm ngược
   void _cancelPhotoCountdown() {
     _photoCountdownTimer?.cancel();
     setState(() { _photoCountdown = 0; _isPhotoCountingDown = false; });
   }
 
-  // ── Photo Post-Processing: Beauty Filter, HDR Low-Light, Timestamp & Mirror ─
+  // ── Xử lý ảnh sau chụp: Filter, HDR, Timestamp & Lật ảnh ─
+  /// Áp dụng các hiệu ứng: filter màu, HDR, timestamp watermark, và lật ảnh selfie
   Future<void> _processCapturedPhoto(String sourcePath, String destPath) async {
-    final applyHdr = _hdrMode == HdrMode.on || _hdrMode == HdrMode.auto;
-    final applyTimestamp = _showTimestamp;
-    final filterMatrix = FilterHelper.getMatrix(_selectedFilter);
-    final applyFilter = filterMatrix != null;
-    // Mirror flip: apply when front camera AND mirror setting is enabled
+    final applyHdr = _hdrMode == HdrMode.on || _hdrMode == HdrMode.auto; // Có bật HDR không
+    final applyTimestamp = _showTimestamp; // Có hiển thị timestamp không
+    final filterMatrix = FilterHelper.getMatrix(_selectedFilter); // Matrix filter màu
+    final applyFilter = filterMatrix != null; // Có filter nào được chọn không
+    // Lật ảnh: áp dụng khi camera trước VÀ setting lật ảnh được bật
     final applyMirror = _isFrontCamera && _mirrorFrontCamera;
 
+    // Nếu không có hiệu ứng nào, chỉ copy file
     if (!applyHdr && !applyTimestamp && !applyFilter && !applyMirror) {
       await File(sourcePath).copy(destPath);
       return;
     }
 
     try {
-      final bytes = await File(sourcePath).readAsBytes();
-      final codec = await ui.instantiateImageCodec(bytes);
-      final frame = await codec.getNextFrame();
-      final image = frame.image;
+      final bytes = await File(sourcePath).readAsBytes(); // Đọc file ảnh
+      final codec = await ui.instantiateImageCodec(bytes); // Decode ảnh
+      final frame = await codec.getNextFrame(); // Lấy frame đầu tiên
+      final image = frame.image; // Lấy image object
 
-      final recorder = ui.PictureRecorder();
-      final canvas = Canvas(recorder);
+      final recorder = ui.PictureRecorder(); // Recorder để vẽ lại
+      final canvas = Canvas(recorder); // Canvas để vẽ
 
-      // Apply horizontal mirror flip for front camera selfie
+      // Áp dụng lật ngang cho ảnh selfie camera trước
       if (applyMirror) {
         canvas.save();
-        canvas.translate(image.width.toDouble(), 0);
-        canvas.scale(-1.0, 1.0);
+        canvas.translate(image.width.toDouble(), 0); // Dịch sang phải
+        canvas.scale(-1.0, 1.0); // Lật ngang
       }
 
-      // 1. Base image layer (with color/beauty filter if selected)
+      // 1. Layer ảnh gốc (với filter màu/beauty nếu được chọn)
       final basePaint = Paint();
       if (applyFilter) {
-        basePaint.colorFilter = ColorFilter.matrix(filterMatrix);
+        basePaint.colorFilter = ColorFilter.matrix(filterMatrix); // Áp dụng filter
       }
-      canvas.drawImage(image, Offset.zero, basePaint);
+      canvas.drawImage(image, Offset.zero, basePaint); // Vẽ ảnh gốc
 
       if (applyHdr) {
-        // 2. HDR Shadow Recovery layer (Screen blend + brightness offset in dark regions)
+        // 2. Layer HDR Shadow Recovery (Screen blend + sáng vùng tối)
         final hdrShadowPaint = Paint()
-          ..blendMode = BlendMode.screen
+          ..blendMode = BlendMode.screen // Blend mode screen
           ..colorFilter = const ColorFilter.matrix(<double>[
-            0.30, 0.0, 0.0, 0.0, 18,
-            0.0, 0.30, 0.0, 0.0, 18,
-            0.0, 0.0, 0.30, 0.0, 18,
-            0.0, 0.0, 0.0, 1.0, 0,
+            0.30, 0.0, 0.0, 0.0, 18, // Red channel
+            0.0, 0.30, 0.0, 0.0, 18, // Green channel
+            0.0, 0.0, 0.30, 0.0, 18, // Blue channel
+            0.0, 0.0, 0.0, 1.0, 0,   // Alpha
           ]);
-        canvas.drawImage(image, Offset.zero, hdrShadowPaint);
+        canvas.drawImage(image, Offset.zero, hdrShadowPaint); // Vẽ layer shadow
 
-        // 3. Dynamic contrast & color vibrancy enhancement (SoftLight blend)
+        // 3. Layer tăng độ tương phản & độ rực màu (SoftLight blend)
         final hdrVibrancePaint = Paint()
-          ..blendMode = BlendMode.softLight
+          ..blendMode = BlendMode.softLight // Blend mode soft light
           ..colorFilter = const ColorFilter.matrix(<double>[
-            1.10, 0.0, 0.0, 0.0, 0,
+            1.10, 0.0, 0.0, 0.0, 0, // Tăng 10% độ rực
             0.0, 1.10, 0.0, 0.0, 0,
             0.0, 0.0, 1.10, 0.0, 0,
             0.0, 0.0, 0.0, 1.0, 0,
           ]);
-        canvas.drawImage(image, Offset.zero, hdrVibrancePaint);
+        canvas.drawImage(image, Offset.zero, hdrVibrancePaint); // Vẽ layer vibrance
       }
 
-      // Restore canvas transform after mirror
+      // Khôi phục transform canvas sau khi lật
       if (applyMirror) {
         canvas.restore();
       }
 
-      // 4. Timestamp Watermark (if enabled)
+      // 4. Timestamp Watermark (nếu được bật)
       if (applyTimestamp) {
         final now = DateTime.now();
         final dateStr =
             '${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year} ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
 
-        final fontSize = (image.width * 0.026).clamp(24.0, 72.0);
+        final fontSize = (image.width * 0.026).clamp(24.0, 72.0); // Kích thước font theo kích thước ảnh
         final padding = fontSize * 0.8;
 
         final textSpan = TextSpan(
           text: dateStr,
           style: TextStyle(
-            color: const Color(0xFFFFD700),
+            color: const Color(0xFFFFD700), // Màu vàng
             fontSize: fontSize,
             fontWeight: FontWeight.bold,
             fontFamily: 'monospace',
             shadows: const [
-              Shadow(color: Colors.black, offset: Offset(2, 2), blurRadius: 4),
+              Shadow(color: Colors.black, offset: Offset(2, 2), blurRadius: 4), // Bóng đổ
               Shadow(color: Colors.black87, offset: Offset(-1, -1), blurRadius: 3),
             ],
           ),
@@ -625,11 +661,12 @@ class _CameraScreenState extends State<CameraScreen>
           text: textSpan,
           textDirection: TextDirection.ltr,
         );
-        textPainter.layout();
+        textPainter.layout(); // Tính toán kích thước text
 
-        final x = image.width - textPainter.width - padding;
-        final y = image.height - textPainter.height - padding;
+        final x = image.width - textPainter.width - padding; // Vị trí x (góc phải)
+        final y = image.height - textPainter.height - padding; // Vị trí y (góc dưới)
 
+        // Vẽ nền đằng sau timestamp
         final bgRect = RRect.fromRectAndRadius(
           Rect.fromLTWH(
             x - padding * 0.4,
@@ -641,44 +678,45 @@ class _CameraScreenState extends State<CameraScreen>
         );
         canvas.drawRRect(
           bgRect,
-          Paint()..color = Colors.black.withAlpha(120),
+          Paint()..color = Colors.black.withAlpha(120), // Nền đen trong suốt
         );
 
-        textPainter.paint(canvas, Offset(x, y));
+        textPainter.paint(canvas, Offset(x, y)); // Vẽ text timestamp
       }
 
-      final picture = recorder.endRecording();
-      final outputImage = await picture.toImage(image.width, image.height);
-      final byteData = await outputImage.toByteData(format: ui.ImageByteFormat.png);
+      final picture = recorder.endRecording(); // Kết thúc vẽ
+      final outputImage = await picture.toImage(image.width, image.height); // Tạo image từ picture
+      final byteData = await outputImage.toByteData(format: ui.ImageByteFormat.png); // Chuyển thành bytes
 
       if (byteData != null) {
-        await File(destPath).writeAsBytes(byteData.buffer.asUint8List());
+        await File(destPath).writeAsBytes(byteData.buffer.asUint8List()); // Ghi file
       } else {
-        await File(sourcePath).copy(destPath);
+        await File(sourcePath).copy(destPath); // Fallback: copy
       }
     } catch (e) {
       debugPrint('Photo processing error: $e, fallback to copy');
-      await File(sourcePath).copy(destPath);
+      await File(sourcePath).copy(destPath); // Fallback khi lỗi
     }
   }
 
-  // ── Single photo ──────────────────────────────────────────────────────────────
+  // ── Chụp ảnh đơn ──────────────────────────────────────────────────────────────
+  /// Chụp một ảnh đơn, áp dụng hiệu ứng và lưu
   Future<void> _takePhoto() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
     setState(() => _isTakingPhoto = true);
     try {
-      final xFile = await _controller!.takePicture();
-      final dir = await _getSaveDir(false);
-      final filePath = path.join(dir, 'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg');
-      
-      await _processCapturedPhoto(xFile.path, filePath);
+      final xFile = await _controller!.takePicture(); // Chụp ảnh từ camera
+      final dir = await _getSaveDir(false); // Lấy thư mục lưu ảnh
+      final filePath = path.join(dir, 'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg'); // Tạo tên file
+
+      await _processCapturedPhoto(xFile.path, filePath); // Xử lý ảnh (filter, HDR, timestamp, mirror)
 
       setState(() { _isTakingPhoto = false; _lastSavedPath = filePath; _lastSavedIsVideo = false; });
       if (mounted) {
         final locText = _storageLocation == StorageLocation.sdcard ? 'thẻ nhớ SD' : 'điện thoại';
         final hdrText = _hdrMode != HdrMode.off ? ' (HDR)' : '';
         _showSnackbar('✅ Đã lưu ảnh$hdrText vào $locText', Colors.green);
-        _openPreview(filePath, false);
+        _openPreview(filePath, false); // Mở màn hình xem ảnh
       }
     } catch (e) {
       setState(() => _isTakingPhoto = false);
@@ -689,7 +727,8 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  // ── Burst shooting ────────────────────────────────────────────────────────────
+  // ── Chụp liên tiếp (Burst mode) ────────────────────────────────────────────────────────────
+  /// Chụp nhiều ảnh liên tiếp với khoảng cách 300ms giữa các frame
   Future<void> _takeBurstPhotos(int count) async {
     if (_controller == null || !_controller!.value.isInitialized) return;
     setState(() {
@@ -697,22 +736,22 @@ class _CameraScreenState extends State<CameraScreen>
       _burstProgress = 0;
       _burstTotal = count;
     });
-    final dir = await _getSaveDir(false);
+    final dir = await _getSaveDir(false); // Lấy thư mục lưu
     String? lastPath;
     int saved = 0;
     for (int i = 0; i < count; i++) {
       if (!mounted || _controller == null) break;
       try {
-        setState(() { _isTakingPhoto = true; _burstProgress = i + 1; });
-        final xFile = await _controller!.takePicture();
-        final filePath = path.join(dir, 'BURST_${DateTime.now().millisecondsSinceEpoch}_${i + 1}.jpg');
-        
-        await _processCapturedPhoto(xFile.path, filePath);
+        setState(() { _isTakingPhoto = true; _burstProgress = i + 1; }); // Cập nhật tiến trình
+        final xFile = await _controller!.takePicture(); // Chụp frame
+        final filePath = path.join(dir, 'BURST_${DateTime.now().millisecondsSinceEpoch}_${i + 1}.jpg'); // Tên file
+
+        await _processCapturedPhoto(xFile.path, filePath); // Xử lý ảnh
 
         lastPath = filePath;
         saved++;
         setState(() => _isTakingPhoto = false);
-        // short gap between frames (~300 ms)
+        // Khoảng cách giữa các frame (~300ms)
         if (i < count - 1) await Future.delayed(const Duration(milliseconds: 300));
       } catch (e) {
         setState(() => _isTakingPhoto = false);
@@ -739,24 +778,26 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  // ── Video recording ───────────────────────────────────────────────────────────
+  // ── Quay video ───────────────────────────────────────────────────────────
+  /// Xử lý nút quay video: bắt đầu hoặc dừng
   Future<void> _handleVideoButton() async {
     _isRecording ? await _stopRecording() : await _startRecording();
   }
 
+  /// Bắt đầu quay video
   Future<void> _startRecording() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
     try {
-      await _controller!.startVideoRecording();
-      WakelockPlus.enable();
+      await _controller!.startVideoRecording(); // Bắt đầu ghi
+      WakelockPlus.enable(); // Giữ màn hình không tắt
       setState(() { _isRecording = true; _recordingElapsed = 0; });
       _recordingTimer = Timer.periodic(const Duration(seconds: 1), (_) {
-        setState(() => _recordingElapsed++);
+        setState(() => _recordingElapsed++); // Đếm thời gian quay
       });
       final limit = _videoDurationSeconds(_selectedVideoDuration);
       if (limit > 0) {
         _autoStopTimer = Timer(Duration(seconds: limit), () {
-          if (_isRecording) _stopRecording();
+          if (_isRecording) _stopRecording(); // Tự động dừng sau thời gian limit
         });
       }
     } on CameraException catch (e) {
@@ -764,17 +805,18 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  /// Dừng quay video và lưu file
   Future<void> _stopRecording() async {
     if (_controller == null || !_isRecording) return;
     _recordingTimer?.cancel();
     _autoStopTimer?.cancel();
 
-    // Mark not recording immediately so UI updates and double-stop is prevented
+    // Đánh dấu không đang quay ngay để UI cập nhật và tránh dừng 2 lần
     setState(() { _isRecording = false; _recordingElapsed = 0; });
 
     XFile? xFile;
     try {
-      xFile = await _controller!.stopVideoRecording();
+      xFile = await _controller!.stopVideoRecording(); // Dừng ghi
     } catch (e) {
       WakelockPlus.disable();
       debugPrint('stopVideoRecording error: $e');
@@ -784,7 +826,7 @@ class _CameraScreenState extends State<CameraScreen>
 
     WakelockPlus.disable();
 
-    // Show saving progress (especially important for large SD card writes)
+    // Hiển thị tiến trình lưu (quan trọng cho file lớn trên SD card)
     if (mounted) {
       _showSnackbar('💾 Đang lưu video, vui lòng chờ...', Colors.blueGrey);
     }
@@ -793,7 +835,7 @@ class _CameraScreenState extends State<CameraScreen>
       final srcPath = xFile.path;
       final srcFile = File(srcPath);
 
-      // Validate source file exists and has content
+      // Kiểm tra file nguồn tồn tại và có nội dung
       if (!srcFile.existsSync() || srcFile.lengthSync() == 0) {
         throw Exception('File video tạm rỗng hoặc không tồn tại: $srcPath');
       }
@@ -801,17 +843,17 @@ class _CameraScreenState extends State<CameraScreen>
       final srcSize = srcFile.lengthSync();
       debugPrint('Video source: $srcPath (${(srcSize / 1024 / 1024).toStringAsFixed(1)} MB)');
 
-      // Resolve destination directory
+      // Xác định thư mục đích
       final dir = await _getSaveDir(true);
       final fileName = 'VID_${DateTime.now().millisecondsSinceEpoch}.mp4';
       final destPath = path.join(dir, fileName);
 
-      // ── Streaming copy: chunk-by-chunk to avoid OOM on large files ──
-      // This is critical for SD card: File.copy() can crash with > 100 MB files
-      // because Android imposes cross-filesystem copy size limits.
+      // ── Streaming copy: chunk-by-chunk để tránh OOM với file lớn ──
+      // Quan trọng cho SD card: File.copy() có thể crash với file > 100MB
+      // vì Android giới hạn kích thước copy cross-filesystem.
       await _streamCopyFile(srcPath, destPath);
 
-      // Validate destination was written correctly (at least 95% of source size)
+      // Kiểm tra file đích được ghi đúng (ít nhất 95% kích thước nguồn)
       final destFile = File(destPath);
       final destSize = destFile.existsSync() ? destFile.lengthSync() : 0;
       if (destSize < (srcSize * 0.95).toInt()) {
@@ -823,31 +865,31 @@ class _CameraScreenState extends State<CameraScreen>
 
       debugPrint('Video saved: $destPath (${(destSize / 1024 / 1024).toStringAsFixed(1)} MB)');
 
-      // Clean up source temp file to free camera temp storage
+      // Xóa file tạm nguồn để giải phóng storage camera
       try { srcFile.deleteSync(); } catch (_) {}
 
       if (mounted) {
         setState(() { _lastSavedPath = destPath; _lastSavedIsVideo = true; });
         final locText = _storageLocation == StorageLocation.sdcard ? 'thẻ nhớ SD' : 'điện thoại';
         _showSnackbar('✅ Đã lưu video vào $locText', Colors.green);
-        _openPreview(destPath, true);
+        _openPreview(destPath, true); // Mở màn hình xem video
       }
     } catch (e) {
       debugPrint('Save video error: $e');
       if (mounted) {
-        // Try fallback: save to phone internal storage instead
+        // Thử fallback: lưu vào bộ nhớ trong điện thoại
         await _saveVideoFallbackToPhone(xFile.path, e.toString());
       }
     }
   }
 
-  /// Streams a file copy chunk-by-chunk so large video files (hundreds of MB)
-  /// are transferred without loading everything into RAM or blocking the main thread.
+  /// Copy file chunk-by-chunk để tránh OOM với file video lớn (hundreds of MB)
+  /// và không block main thread
   Future<void> _streamCopyFile(String srcPath, String destPath) async {
     final src = File(srcPath);
     final dest = File(destPath);
 
-    // Ensure parent directory exists
+    // Đảm bảo thư mục cha tồn tại
     final parent = dest.parent;
     if (!parent.existsSync()) {
       parent.createSync(recursive: true);
@@ -856,21 +898,20 @@ class _CameraScreenState extends State<CameraScreen>
     final input = src.openRead();
     final output = dest.openWrite();
     try {
-      // pipe() streams chunk-by-chunk and automatically calls close() on the sink
-      // when done, ensuring all data is flushed and committed — do NOT call
-      // flush() or close() again after pipe() or it will throw StateError.
+      // pipe() streams chunk-by-chunk và tự động gọi close() khi xong
+      // đảm bảo dữ liệu được flush và commit — KHÔNG gọi flush() hoặc close()
+      // lại sau pipe() hoặc sẽ throw StateError.
       await input.pipe(output);
     } catch (e) {
-      // Clean up partial destination file on error
+      // Xóa file đích partial khi lỗi
       try {
-        // output may or may not be closed depending on where the error occurred
         if (dest.existsSync()) dest.deleteSync();
       } catch (_) {}
       rethrow;
     }
   }
 
-  /// Fallback: if SD card save fails, attempt to save to phone internal storage.
+  /// Fallback: nếu lưu SD card thất bại, thử lưu vào bộ nhớ trong điện thoại
   Future<void> _saveVideoFallbackToPhone(String srcPath, String originalError) async {
     debugPrint('Attempting phone storage fallback after: $originalError');
     try {
@@ -880,7 +921,7 @@ class _CameraScreenState extends State<CameraScreen>
         return;
       }
 
-      // Temporarily force phone storage for this save
+      // Tạm thời ép buộc lưu vào bộ nhớ trong
       final prevStorage = _storageLocation;
       _storageLocation = StorageLocation.phone;
       final dir = await _getSaveDir(true);
@@ -911,12 +952,14 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  /// Mở màn hình xem ảnh/video
   void _openPreview(String filePath, bool isVideo) {
     Navigator.push(context, MaterialPageRoute(
       builder: (_) => PreviewScreen(filePath: filePath, isVideo: isVideo),
     ));
   }
 
+  /// Hiển thị thông báo SnackBar
   void _showSnackbar(String msg, Color color) {
     ScaffoldMessenger.of(context).showSnackBar(SnackBar(
       content: Text(msg),
@@ -925,15 +968,15 @@ class _CameraScreenState extends State<CameraScreen>
     ));
   }
 
-  // ── Change quality ─────────────────────────────────────────────────────────────
+  // ── Đổi chất lượng camera ─────────────────────────────────────────────────────────────
   Future<void> _changeQuality(ResolutionPreset preset) async {
-    if (_isRecording) return;
+    if (_isRecording) return; // Không đổi khi đang quay
     setState(() { _resolution = preset; _isInitializing = true; });
-    await _initCamera();
+    await _initCamera(); // Khởi tạo lại camera với chất lượng mới
   }
 
   // ─────────────────────────────────────────────────────────────────────────────
-  // BUILD
+  // BUILD UI
   // ─────────────────────────────────────────────────────────────────────────────
   @override
   Widget build(BuildContext context) {
@@ -941,23 +984,24 @@ class _CameraScreenState extends State<CameraScreen>
       backgroundColor: Colors.black,
       body: SafeArea(
         child: Column(children: [
-          _buildTopBar(),
-          Expanded(child: _buildPreviewArea()),
-          _buildBottomControls(),
+          _buildTopBar(), // Thanh điều khiển trên cùng
+          Expanded(child: _buildPreviewArea()), // Khu vực preview camera
+          _buildBottomControls(), // Thanh điều khiển dưới cùng
         ]),
       ),
     );
   }
 
-  // ── Top bar ───────────────────────────────────────────────────────────────────
+  // ── Thanh điều khiển trên cùng ───────────────────────────────────────────────────────────
+  /// Hiển thị: Flash, HDR, Filter, Chống rung, Timer quay, và các nút Grid/Settings
   Widget _buildTopBar() {
     return Container(
-      color: Colors.black,
+      color: Colors.red,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
         children: [
-          // ── Left: Flash, HDR, Filter, Stabilization, and Title (Scrollable) ──
+          // ── Trái: Flash, HDR, Filter, Chống rung, và Tiêu đề (Có thể scroll) ──
           Expanded(
             child: SingleChildScrollView(
               scrollDirection: Axis.horizontal,
@@ -965,6 +1009,7 @@ class _CameraScreenState extends State<CameraScreen>
               child: Row(
                 mainAxisSize: MainAxisSize.min,
                 children: [
+                  // Nút Flash
                   IconButton(
                     icon: Icon(
                       _flashIcon,
@@ -973,6 +1018,7 @@ class _CameraScreenState extends State<CameraScreen>
                     onPressed: _toggleFlash,
                     tooltip: _mode == CameraMode.photo ? 'Đèn Flash' : 'Đèn chiếu sáng (Torch)',
                   ),
+                  // Nút HDR (chỉ chế độ ảnh)
                   if (_mode == CameraMode.photo) ...[
                     const SizedBox(width: 2),
                     GestureDetector(
@@ -1117,7 +1163,7 @@ class _CameraScreenState extends State<CameraScreen>
                     ),
                   ),
                   const SizedBox(width: 8),
-                  // Recording Timer or Mode Title
+                  // Timer quay hoặc Tiêu đề chế độ
                   if (_isRecording)
                     Container(
                       padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 4),
@@ -1168,11 +1214,11 @@ class _CameraScreenState extends State<CameraScreen>
 
           const SizedBox(width: 6),
 
-          // ── Right: Grid & Settings Buttons (ALWAYS PINNED, HIGH VISIBILITY, GUARANTEED UNTRUNCATED) ──
+          // ── Phải: Nút Lưới & Cài đặt (LUÔN HIỂN THỊ, KHÔNG BỊ ẨN) ──
           Row(
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Grid Toggle Icon Button
+              // Nút Toggle Lưới 9 ô
               Tooltip(
                 message: _showGrid ? 'Tắt lưới 9 ô' : 'Bật lưới 9 ô',
                 child: Material(
@@ -1214,7 +1260,7 @@ class _CameraScreenState extends State<CameraScreen>
 
               const SizedBox(width: 8),
 
-              // Camera Settings Icon Button
+              // Nút Cài đặt Camera
               Tooltip(
                 message: 'Cài đặt camera',
                 child: Material(
@@ -1226,12 +1272,18 @@ class _CameraScreenState extends State<CameraScreen>
                       duration: const Duration(milliseconds: 200),
                       padding: const EdgeInsets.all(8),
                       decoration: BoxDecoration(
-                        color: const Color(0xFFFFD700).withAlpha(45),
+                        color: _showSettings
+                            ? const Color(0xFFFFD700).withAlpha(45)
+                            : Colors.white.withAlpha(25),
+                        color: const Color(0xFFFFD700).withAlpha(45)
                         shape: BoxShape.circle,
                         border: Border.all(
+                          color: _showSettings ? const Color(0xFFFFD700) : Colors.white38,
                           color: const Color(0xFFFFD700),
                           width: 1.2,
                         ),
+                        boxShadow: _showSettings
+                            ? [
                         boxShadow: [
                                 BoxShadow(
                                   color: const Color(0xFFFFD700).withAlpha(90),
@@ -1239,6 +1291,7 @@ class _CameraScreenState extends State<CameraScreen>
                                   spreadRadius: 1,
                                 )
                               ]
+                            : null,
                       ),
                       child: Icon(
                         Icons.tune,
@@ -1256,22 +1309,23 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
-  // ── Camera preview (aspect-ratio correct, pinch-zoom, stabilization & real-time filter matrix) ──
+  // ── Preview camera (đúng tỷ lệ, pinch-zoom, chống rung & filter real-time) ──
+  /// Xây dựng widget preview camera với các hiệu ứng: chống rung, filter, lật ảnh, và gesture zoom
   Widget _buildCameraPreview() {
     final previewSize = _controller!.value.previewSize;
     if (previewSize == null) {
       return CameraPreview(_controller!);
     }
 
-    final double sensorW = previewSize.height; // landscape width  → portrait height-axis
-    final double sensorH = previewSize.width;  // landscape height → portrait width-axis
+    final double sensorW = previewSize.height; // Chiều rộng landscape → trục chiều cao portrait
+    final double sensorH = previewSize.width;  // Chiều cao landscape → trục chiều rộng portrait
 
     Widget preview = OverflowBox(
       maxWidth: double.infinity,
       maxHeight: double.infinity,
       alignment: Alignment.center,
       child: FittedBox(
-        fit: BoxFit.cover,
+        fit: BoxFit.cover, // Lấp đầy màn hình mà không bị méo
         child: SizedBox(
           width: sensorW,
           height: sensorH,
@@ -1280,15 +1334,15 @@ class _CameraScreenState extends State<CameraScreen>
       ),
     );
 
-    // Apply action-camera motion dampening scale buffer when Super Steady is active
+    // Áp dụng buffer scale để giảm rung khi Super Steady bật
     if (_stabilizationMode == StabilizationMode.superSteady) {
       preview = Transform.scale(
-        scale: 1.04,
+        scale: 1.04, // Scale nhẹ để có room cho crop
         child: preview,
       );
     }
 
-    // Apply real-time 60 FPS GPU color/beauty filter to live viewfinder
+    // Áp dụng filter màu/beauty real-time 60 FPS GPU
     final matrix = FilterHelper.getMatrix(_selectedFilter);
     if (matrix != null) {
       preview = ColorFiltered(
@@ -1297,29 +1351,30 @@ class _CameraScreenState extends State<CameraScreen>
       );
     }
 
-    // Apply horizontal mirror flip for front camera selfie preview
+    // Áp dụng lật ngang cho preview selfie camera trước
     if (_isFrontCamera && _mirrorFrontCamera) {
       preview = Transform(
         alignment: Alignment.center,
-        transform: Matrix4.identity()..scale(-1.0, 1.0, 1.0),
+        transform: Matrix4.identity()..scale(-1.0, 1.0, 1.0), // Lật ngang
         child: preview,
       );
     }
 
-    // Pinch to Zoom gesture
+    // Gesture Pinch to Zoom
     return GestureDetector(
       onScaleStart: (details) {
-        _baseScale = _currentZoom;
+        _baseScale = _currentZoom; // Lưu scale cơ bản khi bắt đầu pinch
       },
       onScaleUpdate: (details) {
         final newZoom = (_baseScale * details.scale).clamp(_minAvailableZoom, _maxAvailableZoom);
-        _setZoom(newZoom);
+        _setZoom(newZoom); // Cập nhật zoom
       },
       child: preview,
     );
   }
 
-  // ── Preview area ──────────────────────────────────────────────────────────────
+  // ── Khu vực preview ──────────────────────────────────────────────────────────────
+  /// Xây dựng khu vực preview với các overlay: lưới, flash, countdown, badges, settings
   Widget _buildPreviewArea() {
     if (_isInitializing) {
       return const Center(child: CircularProgressIndicator(color: Color(0xFFFFD700)));
@@ -1332,7 +1387,7 @@ class _CameraScreenState extends State<CameraScreen>
       );
     }
     return Stack(children: [
-      // ── Camera preview: fill screen, preserve sensor aspect ratio (no stretch) ──
+      // ── Preview camera: lấp đầy màn hình, giữ tỷ lệ sensor (không méo) ──
       Positioned.fill(
         child: _buildCameraPreview(),
       ),
@@ -1340,11 +1395,11 @@ class _CameraScreenState extends State<CameraScreen>
       // Lưới 9 ô (rule of thirds)
       if (_showGrid) _buildGridOverlay(),
 
-      // Flash blink khi chụp
+      // Flash nháy khi chụp
       if (_isTakingPhoto)
         Positioned.fill(child: Container(color: Colors.white.withAlpha(200))),
 
-      // Countdown overlay
+      // Overlay đếm ngược
       if (_isPhotoCountingDown)
         Positioned.fill(
           child: Container(
@@ -1365,7 +1420,7 @@ class _CameraScreenState extends State<CameraScreen>
           ),
         ),
 
-      // Burst progress overlay
+      // Overlay tiến trình chụp liên tiếp
       if (_isBursting)
         Positioned(
           bottom: 16, left: 0, right: 0,
@@ -1392,7 +1447,7 @@ class _CameraScreenState extends State<CameraScreen>
           ),
         ),
 
-      // Burst badge (top-left) when burst mode is active but not shooting
+      // Badge burst (góc trái trên) khi burst mode bật nhưng không đang chụp
       if (_burstCount > 0 && !_isBursting)
         Positioned(
           top: 10, left: 10,
@@ -1418,12 +1473,13 @@ class _CameraScreenState extends State<CameraScreen>
           ),
         ),
 
-      // Badges: Stabilization + Filter + Quality + HDR (top-right)
+      // Badges: Chống rung + Filter + Chất lượng + HDR (góc phải trên)
       Positioned(
         top: 10, right: 10,
         child: Row(
           mainAxisSize: MainAxisSize.min,
           children: [
+            // Badge chống rung
             if (_stabilizationMode != StabilizationMode.off) ...[
               Container(
                 margin: const EdgeInsets.only(right: 6),
@@ -1455,6 +1511,7 @@ class _CameraScreenState extends State<CameraScreen>
                 ),
               ),
             ],
+            // Badge filter
             if (_selectedFilter != CameraFilter.none) ...[
               Container(
                 margin: const EdgeInsets.only(right: 6),
@@ -1480,6 +1537,7 @@ class _CameraScreenState extends State<CameraScreen>
                 ),
               ),
             ],
+            // Badge HDR (chỉ chế độ ảnh)
             if (_mode == CameraMode.photo && _hdrMode != HdrMode.off) ...[
               Container(
                 margin: const EdgeInsets.only(right: 6),
@@ -1498,6 +1556,7 @@ class _CameraScreenState extends State<CameraScreen>
                 ),
               ),
             ],
+            // Badge chất lượng
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
               decoration: BoxDecoration(
@@ -1515,7 +1574,7 @@ class _CameraScreenState extends State<CameraScreen>
         ),
       ),
 
-      // ── Quick Filter Carousel Bar (above bottom controls) ──
+      // ── Thanh chọn Filter nhanh (trên thanh điều khiển dưới) ──
       if (_showFilterBar)
         Positioned(
           bottom: 12,
@@ -1529,18 +1588,19 @@ class _CameraScreenState extends State<CameraScreen>
           ),
         ),
 
-      // Settings panel
+      // Panel cài đặt
       if (_showSettings) _buildSettingsPanel(),
     ]);
   }
 
-  // ── Settings panel ────────────────────────────────────────────────────────────
+  // ── Panel cài đặt ────────────────────────────────────────────────────────────
+  /// Hiển thị panel cài đặt ở dưới cùng với các tùy chọn: chống rung, filter, lưới, lật ảnh, chất lượng, HDR, timer, burst, timestamp, storage
   Widget _buildSettingsPanel() {
     return Positioned(
       bottom: 0, left: 0, right: 0,
       child: Container(
         constraints: BoxConstraints(
-          maxHeight: MediaQuery.of(context).size.height * 0.65,
+          maxHeight: MediaQuery.of(context).size.height * 0.65, // Tối đa 65% chiều cao màn hình
         ),
         padding: const EdgeInsets.fromLTRB(20, 14, 20, 20),
         decoration: BoxDecoration(
@@ -1562,7 +1622,7 @@ class _CameraScreenState extends State<CameraScreen>
             crossAxisAlignment: CrossAxisAlignment.start,
             mainAxisSize: MainAxisSize.min,
             children: [
-              // Header bar with title and close button
+              // Header với tiêu đề và nút đóng
               Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
@@ -1618,14 +1678,18 @@ class _CameraScreenState extends State<CameraScreen>
               _buildMirrorSettingsSelector(),
               const SizedBox(height: 18),
 
+              // Chất lượng
               QualitySelector(selected: _resolution, onChanged: _changeQuality),
               const SizedBox(height: 18),
+              // Các tùy chọn theo chế độ
               if (_mode == CameraMode.photo) ...[
+                // HDR (chỉ ảnh)
                 HdrSelector(
                   selected: _hdrMode,
                   onChanged: (v) => setState(() => _hdrMode = v),
                 ),
                 const SizedBox(height: 18),
+                // Timer chụp ảnh
                 TimerSelector(
                   label: 'HẸN GIỜ CHỤP ẢNH',
                   icon: Icons.timer_outlined,
@@ -1634,13 +1698,16 @@ class _CameraScreenState extends State<CameraScreen>
                   onChanged: (v) => setState(() => _selectedPhotoTimer = v),
                 ),
                 const SizedBox(height: 18),
+                // Chụp liên tiếp
                 _buildBurstSelector(),
                 const SizedBox(height: 18),
+                // Timestamp
                 TimestampSelector(
                   enabled: _showTimestamp,
                   onChanged: (v) => setState(() => _showTimestamp = v),
                 ),
               ] else ...[
+                // Timer quay video
                 TimerSelector(
                   label: 'THỜI LƯỢNG QUAY TỰ ĐỘNG',
                   icon: Icons.videocam_outlined,
@@ -1650,6 +1717,7 @@ class _CameraScreenState extends State<CameraScreen>
                 ),
               ],
               const SizedBox(height: 18),
+              // Vị trí lưu (SD card / điện thoại)
               StorageSelector(
                 selected: _storageLocation,
                 sdcardAvailable: _sdcardAvailable,
@@ -1663,13 +1731,14 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
-  // ── Bottom controls ────────────────────────────────────────────────────────────
+  // ── Thanh điều khiển dưới cùng ────────────────────────────────────────────────────────────
+  /// Hiển thị: Zoom selector, Chế độ (ảnh/video), Thumbnail, Nút chụp/quay, Nút chuyển camera
   Widget _buildBottomControls() {
     return Container(
       color: Colors.black,
       padding: const EdgeInsets.only(top: 8, bottom: 26),
       child: Column(children: [
-        // ── Zoom Selector (0.5x, 1x, 2x, 4x, 10x - Default 1x) ──
+        // ── Zoom Selector (0.5x, 1x, 2x, 4x, 10x - Mặc định 1x) ──
         ZoomSelector(
           currentZoom: _currentZoom,
           minZoom: _minAvailableZoom,
@@ -1677,6 +1746,7 @@ class _CameraScreenState extends State<CameraScreen>
           onZoomChanged: _setZoom,
         ),
         const SizedBox(height: 10),
+        // Chế độ ảnh/video (ẩn khi đang quay)
         if (!_isRecording) _buildModeSelector(),
         const SizedBox(height: 18),
         Row(
@@ -1707,7 +1777,7 @@ class _CameraScreenState extends State<CameraScreen>
             // Nút chụp / quay
             _buildShutterButton(),
 
-            // Flip camera
+            // Nút chuyển camera (trước/sau)
             GestureDetector(
               onTap: _isRecording ? null : _switchCamera,
               child: Container(
@@ -1730,6 +1800,7 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
+  /// Selector chế độ ảnh/video
   Widget _buildModeSelector() {
     return Row(mainAxisAlignment: MainAxisAlignment.center, children: [
       _ModeButton(
@@ -1746,7 +1817,8 @@ class _CameraScreenState extends State<CameraScreen>
     ]);
   }
 
-  // ── Burst selector (inline widget) ────────────────────────────────────────────────
+  // ── Selector chụp liên tiếp (inline widget) ────────────────────────────────────────────────
+  /// Chọn số tấm chụp liên tiếp: Tắt, 3, 5, 7, 9, 15 tấm
   Widget _buildBurstSelector() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1829,8 +1901,10 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
+  /// Nút chụp/quay chính
   Widget _buildShutterButton() {
     if (_mode == CameraMode.photo) {
+      // Nút chụp ảnh
       return GestureDetector(
         onTap: _handleCapture,
         child: AnimatedContainer(
@@ -1855,6 +1929,7 @@ class _CameraScreenState extends State<CameraScreen>
         ),
       );
     } else {
+      // Nút quay video
       return GestureDetector(
         onTap: _handleVideoButton,
         child: AnimatedContainer(
@@ -1881,8 +1956,8 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  // ── Grid overlay ────────────────────────────────────────────────────────────
-  /// Rule-of-thirds 3×3 grid with intersection highlight dots.
+  // ── Overlay lưới 9 ô ────────────────────────────────────────────────────────────
+  /// Lưới 3×3 rule-of-thirds với điểm giao highlight
   Widget _buildGridOverlay() {
     return Positioned.fill(
       child: IgnorePointer(
@@ -1893,7 +1968,8 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
-  // ── Grid Settings Selector ──────────────────────────────────────────────────
+  // ── Selector lưới trong cài đặt ──────────────────────────────────────────────────
+  /// Chọn bật/tắt lưới 9 ô
   Widget _buildGridSettingsSelector() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1935,7 +2011,8 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
-  // ── Mirror / Selfie Flip Settings Selector ────────────────────────────────────
+  // ── Selector lật ảnh selfie trong cài đặt ────────────────────────────────────
+  /// Chọn bật/tắt lật ảnh cho camera trước
   Widget _buildMirrorSettingsSelector() {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -1954,6 +2031,7 @@ class _CameraScreenState extends State<CameraScreen>
               ),
             ),
             const SizedBox(width: 8),
+            // Badge "Camera trước" khi đang dùng camera trước
             if (_isFrontCamera)
               Container(
                 padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
@@ -2003,39 +2081,41 @@ class _CameraScreenState extends State<CameraScreen>
   }
 }
 
+// ── Painter vẽ lưới 9 ô ────────────────────────────────────────────────────────────────
+/// CustomPainter để vẽ lưới 3×3 rule-of-thirds với 4 điểm giao highlight vàng
 class _GridPainter extends CustomPainter {
   @override
   void paint(Canvas canvas, Size size) {
     final linePaint = Paint()
-      ..color = Colors.white.withAlpha(70)
+      ..color = Colors.white.withAlpha(70) // Màu trắng trong suốt
       ..strokeWidth = 0.8
       ..style = PaintingStyle.stroke;
 
     final dotPaint = Paint()
-      ..color = const Color(0xFFFFD700).withAlpha(180)
+      ..color = const Color(0xFFFFD700).withAlpha(180) // Màu vàng trong suốt
       ..style = PaintingStyle.fill;
 
     final w = size.width;
     final h = size.height;
 
-    // 2 vertical lines at 1/3 and 2/3
+    // Vẽ 2 đường dọc tại 1/3 và 2/3
     for (int i = 1; i <= 2; i++) {
       final x = w * i / 3;
       canvas.drawLine(Offset(x, 0), Offset(x, h), linePaint);
     }
 
-    // 2 horizontal lines at 1/3 and 2/3
+    // Vẽ 2 đường ngang tại 1/3 và 2/3
     for (int i = 1; i <= 2; i++) {
       final y = h * i / 3;
       canvas.drawLine(Offset(0, y), Offset(w, y), linePaint);
     }
 
-    // 4 intersection dots (power points)
+    // Vẽ 4 điểm giao (power points) màu vàng
     for (int col = 1; col <= 2; col++) {
       for (int row = 1; row <= 2; row++) {
         canvas.drawCircle(
           Offset(w * col / 3, h * row / 3),
-          3.5,
+          3.5, // Bán kính điểm
           dotPaint,
         );
       }
@@ -2043,14 +2123,15 @@ class _GridPainter extends CustomPainter {
   }
 
   @override
-  bool shouldRepaint(_GridPainter oldDelegate) => false;
+  bool shouldRepaint(_GridPainter oldDelegate) => false; // Không cần repaint lại
 }
 
-// ── Mode button ────────────────────────────────────────────────────────────────
+// ── Nút chọn chế độ (Ảnh/Video) ────────────────────────────────────────────────────────────────
+/// Widget nút để chọn giữa chế độ chụp ảnh và quay video
 class _ModeButton extends StatelessWidget {
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
+  final String label; // Nhãn nút
+  final bool isSelected; // Có được chọn không
+  final VoidCallback onTap; // Callback khi click
 
   const _ModeButton({required this.label, required this.isSelected, required this.onTap});
 
@@ -2062,7 +2143,7 @@ class _ModeButton extends StatelessWidget {
         duration: const Duration(milliseconds: 200),
         padding: const EdgeInsets.symmetric(horizontal: 22, vertical: 10),
         decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFFFFD700) : Colors.white.withAlpha(25),
+          color: isSelected ? const Color(0xFFFFD700) : Colors.white.withAlpha(25), // Vàng khi chọn
           borderRadius: BorderRadius.circular(24),
           border: Border.all(
             color: isSelected ? const Color(0xFFFFD700) : Colors.white24),
@@ -2079,12 +2160,13 @@ class _ModeButton extends StatelessWidget {
   }
 }
 
-// ── Grid option button ─────────────────────────────────────────────────────────
+// ── Nút option trong cài đặt ─────────────────────────────────────────────────────────
+/// Widget nút option cho các tùy chọn trong cài đặt (lưới, lật ảnh, v.v.)
 class _GridOption extends StatelessWidget {
-  final IconData icon;
-  final String label;
-  final bool isSelected;
-  final VoidCallback onTap;
+  final IconData icon; // Icon nút
+  final String label; // Nhãn nút
+  final bool isSelected; // Có được chọn không
+  final VoidCallback onTap; // Callback khi click
 
   const _GridOption({
     required this.icon,
@@ -2101,7 +2183,7 @@ class _GridOption extends StatelessWidget {
         duration: const Duration(milliseconds: 180),
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 9),
         decoration: BoxDecoration(
-          color: isSelected ? const Color(0xFFFFD700) : const Color(0xFF2C2C2E),
+          color: isSelected ? const Color(0xFFFFD700) : const Color(0xFF2C2C2E), // Vàng khi chọn
           borderRadius: BorderRadius.circular(20),
           border: Border.all(
             color: isSelected ? const Color(0xFFFFD700) : const Color(0xFF48484A),
