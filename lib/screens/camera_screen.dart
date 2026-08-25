@@ -1278,7 +1278,6 @@ class _CameraScreenState extends State<CameraScreen>
                         shape: BoxShape.circle,
                         border: Border.all(
                           color: _showSettings ? const Color(0xFFFFD700) : Colors.white38,
-                          color: const Color(0xFFFFD700),
                           width: 1.2,
                         ),
                         boxShadow: _showSettings
