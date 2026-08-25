@@ -996,7 +996,7 @@ class _CameraScreenState extends State<CameraScreen>
   /// Hiển thị: Flash, HDR, Filter, Chống rung, Timer quay, và các nút Grid/Settings
   Widget _buildTopBar() {
     return Container(
-      color: Colors.red,
+      color: Colors.green,
       padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
       child: Row(
         crossAxisAlignment: CrossAxisAlignment.center,
@@ -1322,7 +1322,7 @@ class _CameraScreenState extends State<CameraScreen>
       width: double.infinity,
       height: double.infinity,
       child: FittedBox(
-        fit: BoxFit.cover, // Lấp đầy màn hình mà không bị méo
+        fit: BoxFit.contain, // Chứa trong khung để không tràn lên topBar
         child: SizedBox(
           width: sensorW,
           height: sensorH,
