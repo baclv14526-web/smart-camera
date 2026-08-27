@@ -14,6 +14,7 @@
     <!-- Storage Android 13+ -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
+    <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
     <!-- Giữ màn hình sáng khi quay -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />

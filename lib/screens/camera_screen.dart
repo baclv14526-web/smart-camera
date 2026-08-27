@@ -16,6 +16,8 @@ import '../widgets/hdr_selector.dart'; // Widget chọn HDR
 import '../widgets/filter_selector.dart'; // Widget chọn filter
 import '../widgets/stabilization_selector.dart'; // Widget chọn chống rung
 import '../widgets/zoom_selector.dart'; // Widget chọn zoom
+import '../widgets/capture_sound_selector.dart'; // Widget âm thanh chụp/quay
+import '../services/capture_sound_service.dart'; // Phát tiếng tách tách / mp3
 import 'preview_screen.dart'; // Màn hình xem ảnh/video
 
 // Enum chế độ camera: chụp ảnh hoặc quay video
@@ -104,6 +106,9 @@ class _CameraScreenState extends State<CameraScreen>
   /// Lật ảnh ngang khi dùng camera trước. Mặc định bật khi chụp bằng camera trước.
   bool _mirrorFrontCamera = true;
 
+  // ── Âm thanh chụp ảnh / bắt đầu quay ─────────────────────────────────
+  final CaptureSoundService _captureSound = CaptureSoundService.instance;
+
   // Helper: Kiểm tra camera hiện tại có phải camera trước (selfie) không?
   bool get _isFrontCamera =>
       widget.cameras.isNotEmpty &&
@@ -118,6 +123,9 @@ class _CameraScreenState extends State<CameraScreen>
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this); // Đăng ký observer để theo dõi lifecycle
+    _captureSound.init().then((_) {
+      if (mounted) setState(() {});
+    });
     _requestPermissions(); // Yêu cầu quyền truy cập camera, microphone, storage
     _detectSdCard(); // Phát hiện thẻ SD card
   }
@@ -236,6 +244,7 @@ class _CameraScreenState extends State<CameraScreen>
       Permission.storage, // Quyền truy cập storage
       Permission.photos, // Quyền truy cập ảnh
       Permission.videos, // Quyền truy cập video
+      Permission.audio, // Quyền đọc file mp3 cấu hình âm thanh chụp
       Permission.manageExternalStorage, // Quyền quản lý storage bên ngoài (Android 11+)
     ].request();
 
@@ -705,6 +714,7 @@ class _CameraScreenState extends State<CameraScreen>
     if (_controller == null || !_controller!.value.isInitialized) return;
     setState(() => _isTakingPhoto = true);
     try {
+      await _captureSound.playCaptureSound();
       final xFile = await _controller!.takePicture(); // Chụp ảnh từ camera
       final dir = await _getSaveDir(false); // Lấy thư mục lưu ảnh
       final filePath = path.join(dir, 'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg'); // Tạo tên file
@@ -743,6 +753,7 @@ class _CameraScreenState extends State<CameraScreen>
       if (!mounted || _controller == null) break;
       try {
         setState(() { _isTakingPhoto = true; _burstProgress = i + 1; }); // Cập nhật tiến trình
+        await _captureSound.playCaptureSound();
         final xFile = await _controller!.takePicture(); // Chụp frame
         final filePath = path.join(dir, 'BURST_${DateTime.now().millisecondsSinceEpoch}_${i + 1}.jpg'); // Tên file
 
@@ -788,6 +799,7 @@ class _CameraScreenState extends State<CameraScreen>
   Future<void> _startRecording() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
     try {
+      await _captureSound.playCaptureSound();
       await _controller!.startVideoRecording(); // Bắt đầu ghi
       WakelockPlus.enable(); // Giữ màn hình không tắt
       setState(() { _isRecording = true; _recordingElapsed = 0; });
@@ -1691,6 +1703,31 @@ class _CameraScreenState extends State<CameraScreen>
               // Lật ảnh (Mirror / Selfie Flip) — hiển thị cho cả 2 camera,
               // mặc định BẬT khi camera trước đang hoạt động
               _buildMirrorSettingsSelector(),
+              const SizedBox(height: 18),
+
+              CaptureSoundSelector(
+                selected: _captureSound.source,
+                customFileName: _captureSound.customFileName,
+                onChanged: (v) async {
+                  await _captureSound.setSource(v);
+                  if (v == CaptureSoundSource.customFile &&
+                      (_captureSound.customPath == null ||
+                          _captureSound.customPath!.isEmpty)) {
+                    await _captureSound.pickCustomSound();
+                  }
+                  if (mounted) setState(() {});
+                },
+                onPickFile: () async {
+                  final ok = await _captureSound.pickCustomSound();
+                  if (mounted) {
+                    setState(() {});
+                    if (ok) {
+                      _showSnackbar('Đã chọn ${_captureSound.customFileName}', Colors.green);
+                    }
+                  }
+                },
+                onPreview: () => _captureSound.preview(),
+              ),
               const SizedBox(height: 18),
 
               // Chất lượng
