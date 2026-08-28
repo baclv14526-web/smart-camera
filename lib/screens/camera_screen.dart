@@ -63,6 +63,15 @@ class _CameraScreenState extends State<CameraScreen>
   int _burstProgress = 0; // Số tấm đã chụp trong burst hiện tại
   int _burstTotal = 0;    // Tổng số tấm cần chụp trong burst hiện tại
 
+  // ── Tự động chụp theo khoảng (20 giây × 15 tấm / 5 phút) ──────────────────
+  static const int _autoIntervalSeconds = 20; // Khoảng cách giữa các tấm
+  static const int _autoIntervalPhotoCount = 15; // Số tấm trong 5 phút
+  bool _autoIntervalEnabled = false; // Bật kiểu chụp tự động trong cài đặt
+  bool _isAutoIntervalCapturing = false; // Đang chạy phiên tự động
+  int _autoIntervalProgress = 0; // Số tấm đã chụp trong phiên
+  Timer? _autoIntervalWaitTimer; // Timer chờ đến mốc 20 giây tiếp theo
+  Completer<void>? _autoIntervalWait; // Hoàn tất sớm khi người dùng dừng phiên
+
   // ── Thời lượng quay video ───────────────────────────────────────────────────────────
   final List<String> _videoDurationOptions = [
     'Tắt', '15s', '30s', '1 phút', '3 phút', '5 phút', '10 phút',
@@ -134,6 +143,7 @@ class _CameraScreenState extends State<CameraScreen>
   void dispose() {
     WidgetsBinding.instance.removeObserver(this); // Hủy đăng ký observer
     _photoCountdownTimer?.cancel(); // Hủy timer đếm ngược
+    _autoIntervalWaitTimer?.cancel();
     _recordingTimer?.cancel(); // Hủy timer đếm thời gian quay
     _autoStopTimer?.cancel(); // Hủy timer tự động dừng
     _controller?.dispose(); // Giải phóng camera controller
@@ -146,6 +156,7 @@ class _CameraScreenState extends State<CameraScreen>
     // Xử lý khi app chuyển trạng thái (background/foreground)
     if (_controller == null || !_controller!.value.isInitialized) return;
     if (state == AppLifecycleState.inactive) {
+      _stopAutoIntervalCapture();
       _controller?.dispose(); // Khi app vào background, giải phóng camera
     } else if (state == AppLifecycleState.resumed) {
       _initCamera(); // Khi app trở lại foreground, khởi tạo lại camera
@@ -318,6 +329,7 @@ class _CameraScreenState extends State<CameraScreen>
   // ── Chuyển camera (trước/sau) ─────────────────────────────────────────────────────────────
   /// Chuyển giữa camera sau và camera trước
   Future<void> _switchCamera() async {
+    if (_isAutoIntervalCapturing) _stopAutoIntervalCapture();
     if (widget.cameras.length < 2) return; // Cần ít nhất 2 camera
     final nextIndex = _cameraIndex == 0 ? 1 : 0; // Toggle index
     final nextIsFront = nextIndex < widget.cameras.length &&
@@ -530,20 +542,30 @@ class _CameraScreenState extends State<CameraScreen>
   Future<void> _handleCapture() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
     if (_isBursting) return; // Bỏ qua nếu đang chụp liên tiếp
+    if (_isAutoIntervalCapturing) {
+      _stopAutoIntervalCapture(); // Chạm lần nữa để dừng phiên tự động
+      return;
+    }
     if (_isPhotoCountingDown) {
       _cancelPhotoCountdown(); // Hủy đếm ngược nếu đang chạy
       return;
     }
     final delay = _photoTimerSeconds(_selectedPhotoTimer); // Lấy thời gian timer
     if (delay == 0) {
-      // Không có timer
-      if (_burstCount > 0) {
-        await _takeBurstPhotos(_burstCount); // Chụp liên tiếp
-      } else {
-        await _takePhoto(); // Chụp đơn
-      }
+      await _runPhotoCapture();
     } else {
       _startPhotoCountdown(delay); // Bắt đầu đếm ngược
+    }
+  }
+
+  /// Chụp theo kiểu đã chọn: tự động 20s, liên tiếp, hoặc đơn
+  Future<void> _runPhotoCapture() async {
+    if (_autoIntervalEnabled) {
+      await _startAutoIntervalCapture();
+    } else if (_burstCount > 0) {
+      await _takeBurstPhotos(_burstCount);
+    } else {
+      await _takePhoto();
     }
   }
 
@@ -557,12 +579,7 @@ class _CameraScreenState extends State<CameraScreen>
       if (_photoCountdown <= 1) {
         t.cancel();
         setState(() { _photoCountdown = 0; _isPhotoCountingDown = false; });
-        // Đếm ngược xong, thực hiện chụp
-        if (_burstCount > 0) {
-          _takeBurstPhotos(_burstCount);
-        } else {
-          _takePhoto();
-        }
+        _runPhotoCapture();
       } else {
         setState(() => _photoCountdown--); // Giảm đếm
       }
@@ -787,6 +804,99 @@ class _CameraScreenState extends State<CameraScreen>
         _showSnackbar('❌ Không thể lưu ảnh chụp liên tiếp', Colors.red);
       }
     }
+  }
+
+  // ── Tự động chụp 20 giây × 15 tấm (5 phút rồi dừng) ─────────────────────
+  /// Bấm chụp: chờ 20s chụp tấm 1, rồi cứ 20s một tấm đến đủ 15 tấm (~5 phút).
+  Future<void> _startAutoIntervalCapture() async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+    if (_isAutoIntervalCapturing) return;
+    setState(() {
+      _isAutoIntervalCapturing = true;
+      _autoIntervalProgress = 0;
+    });
+    WakelockPlus.enable();
+    final sessionStart = DateTime.now();
+    final dir = await _getSaveDir(false);
+    String? lastPath;
+    int saved = 0;
+
+    for (int i = 0; i < _autoIntervalPhotoCount; i++) {
+      if (!mounted || !_isAutoIntervalCapturing) break;
+      final target = sessionStart.add(Duration(seconds: _autoIntervalSeconds * (i + 1)));
+      final wait = target.difference(DateTime.now());
+      if (wait > Duration.zero) {
+        _autoIntervalWait = Completer<void>();
+        _autoIntervalWaitTimer?.cancel();
+        _autoIntervalWaitTimer = Timer(wait, () {
+          if (_autoIntervalWait != null && !_autoIntervalWait!.isCompleted) {
+            _autoIntervalWait!.complete();
+          }
+        });
+        await _autoIntervalWait!.future;
+        _autoIntervalWait = null;
+      }
+      if (!mounted || !_isAutoIntervalCapturing) break;
+      if (_controller == null || !_controller!.value.isInitialized) break;
+
+      try {
+        setState(() => _isTakingPhoto = true);
+        await _captureSound.playCaptureSound();
+        final xFile = await _controller!.takePicture();
+        final filePath = path.join(
+          dir,
+          'AUTO_${DateTime.now().millisecondsSinceEpoch}_${i + 1}.jpg',
+        );
+        await _processCapturedPhoto(xFile.path, filePath);
+        lastPath = filePath;
+        saved++;
+        setState(() {
+          _isTakingPhoto = false;
+          _autoIntervalProgress = saved;
+          _lastSavedPath = filePath;
+          _lastSavedIsVideo = false;
+        });
+      } catch (e) {
+        if (mounted) setState(() => _isTakingPhoto = false);
+        debugPrint('Auto interval frame ${i + 1} error: $e');
+      }
+    }
+
+    _autoIntervalWaitTimer?.cancel();
+    _autoIntervalWaitTimer = null;
+    if (!mounted) return;
+    final wasCancelled = !_isAutoIntervalCapturing;
+    setState(() {
+      _isAutoIntervalCapturing = false;
+      _autoIntervalProgress = 0;
+      if (lastPath != null) {
+        _lastSavedPath = lastPath;
+        _lastSavedIsVideo = false;
+      }
+    });
+    WakelockPlus.disable();
+    if (!mounted) return;
+    if (saved > 0) {
+      final locText = _storageLocation == StorageLocation.sdcard ? 'thẻ nhớ SD' : 'điện thoại';
+      final hdrText = _hdrMode != HdrMode.off ? ' (HDR)' : '';
+      final prefix = wasCancelled ? 'Đã dừng' : 'Hoàn tất';
+      _showSnackbar('$prefix: $saved/$_autoIntervalPhotoCount ảnh$hdrText vào $locText', Colors.green);
+    } else if (wasCancelled) {
+      _showSnackbar('Đã dừng chụp tự động', Colors.orange);
+    } else {
+      _showSnackbar('❌ Không thể lưu ảnh tự động', Colors.red);
+    }
+  }
+
+  void _stopAutoIntervalCapture() {
+    _autoIntervalWaitTimer?.cancel();
+    _autoIntervalWaitTimer = null;
+    if (_autoIntervalWait != null && !_autoIntervalWait!.isCompleted) {
+      _autoIntervalWait!.complete();
+    }
+    _autoIntervalWait = null;
+    if (!_isAutoIntervalCapturing) return;
+    setState(() => _isAutoIntervalCapturing = false);
   }
 
   // ── Quay video ───────────────────────────────────────────────────────────
@@ -1474,8 +1584,44 @@ class _CameraScreenState extends State<CameraScreen>
           ),
         ),
 
+      if (_isAutoIntervalCapturing)
+        Positioned(
+          bottom: 16, left: 0, right: 0,
+          child: Center(
+            child: Container(
+              padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+              decoration: BoxDecoration(
+                color: Colors.black.withAlpha(200),
+                borderRadius: BorderRadius.circular(30),
+                border: Border.all(color: const Color(0xFFFFD700), width: 1),
+              ),
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Row(mainAxisSize: MainAxisSize.min, children: [
+                    const Icon(Icons.timer, color: Color(0xFFFFD700), size: 20),
+                    const SizedBox(width: 8),
+                    Text(
+                      'Tự động 20s  $_autoIntervalProgress / $_autoIntervalPhotoCount',
+                      style: const TextStyle(
+                        color: Colors.white, fontSize: 15,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ]),
+                  const SizedBox(height: 4),
+                  const Text(
+                    'Chạm nút chụp để dừng',
+                    style: TextStyle(color: Colors.white70, fontSize: 12),
+                  ),
+                ],
+              ),
+            ),
+          ),
+        ),
+
       // Badge burst (góc trái trên) khi burst mode bật nhưng không đang chụp
-      if (_burstCount > 0 && !_isBursting)
+      if (_burstCount > 0 && !_isBursting && !_isAutoIntervalCapturing)
         Positioned(
           top: 10, left: 10,
           child: Container(
@@ -1495,6 +1641,31 @@ class _CameraScreenState extends State<CameraScreen>
                 style: const TextStyle(
                   color: Colors.black87, fontSize: 11,
                   fontWeight: FontWeight.bold),
+              ),
+            ]),
+          ),
+        ),
+
+      if (_autoIntervalEnabled && !_isAutoIntervalCapturing)
+        Positioned(
+          top: 10, left: 10,
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+            decoration: BoxDecoration(
+              color: const Color(0xFFFFD700),
+              borderRadius: BorderRadius.circular(12),
+              boxShadow: const [
+                BoxShadow(color: Colors.black45, blurRadius: 4, offset: Offset(0, 2)),
+              ],
+            ),
+            child: const Row(mainAxisSize: MainAxisSize.min, children: [
+              Icon(Icons.timer, size: 13, color: Colors.black87),
+              SizedBox(width: 4),
+              Text(
+                'Tự động 20s · 15 tấm',
+                style: TextStyle(
+                    color: Colors.black87, fontSize: 11,
+                    fontWeight: FontWeight.bold),
               ),
             ]),
           ),
@@ -1753,6 +1924,8 @@ class _CameraScreenState extends State<CameraScreen>
                 // Chụp liên tiếp
                 _buildBurstSelector(),
                 const SizedBox(height: 18),
+                _buildAutoIntervalSelector(),
+                const SizedBox(height: 18),
                 // Timestamp
                 TimestampSelector(
                   enabled: _showTimestamp,
@@ -1864,7 +2037,10 @@ class _CameraScreenState extends State<CameraScreen>
       _ModeButton(
         label: '🎬  VIDEO',
         isSelected: _mode == CameraMode.video,
-        onTap: () => setState(() { _mode = CameraMode.video; _showSettings = false; }),
+        onTap: () {
+          if (_isAutoIntervalCapturing) _stopAutoIntervalCapture();
+          setState(() { _mode = CameraMode.video; _showSettings = false; });
+        },
       ),
     ]);
   }
@@ -1901,7 +2077,10 @@ class _CameraScreenState extends State<CameraScreen>
               return Padding(
                 padding: const EdgeInsets.only(right: 8),
                 child: GestureDetector(
-                  onTap: () => setState(() => _burstCount = count),
+                  onTap: () => setState(() {
+                    _burstCount = count;
+                    if (count > 0) _autoIntervalEnabled = false;
+                  }),
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 180),
                     padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
@@ -1953,6 +2132,59 @@ class _CameraScreenState extends State<CameraScreen>
     );
   }
 
+  /// Kiểu chụp tự động: cứ 20 giây một tấm, 15 tấm trong 5 phút rồi dừng hẳn
+  Widget _buildAutoIntervalSelector() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Row(
+          children: [
+            Icon(Icons.timer, size: 16, color: Color(0xFFFFD700)),
+            SizedBox(width: 6),
+            Text(
+              'TỰ ĐỘNG CHỤP (20 GIÂY)',
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w700,
+                letterSpacing: 0.5,
+              ),
+            ),
+          ],
+        ),
+        const SizedBox(height: 6),
+        const Text(
+          'Cứ khoảng 20 giây chụp một tấm, liên tiếp 5 phút (15 ảnh) rồi dừng hẳn.',
+          style: TextStyle(color: Colors.white38, fontSize: 11),
+        ),
+        const SizedBox(height: 8),
+        Row(
+          children: [
+            _GridOption(
+              icon: Icons.timer_off_outlined,
+              label: 'Tắt',
+              isSelected: !_autoIntervalEnabled,
+              onTap: () {
+                if (_isAutoIntervalCapturing) _stopAutoIntervalCapture();
+                setState(() => _autoIntervalEnabled = false);
+              },
+            ),
+            const SizedBox(width: 10),
+            _GridOption(
+              icon: Icons.timer,
+              label: '20s · 15 tấm / 5 phút',
+              isSelected: _autoIntervalEnabled,
+              onTap: () => setState(() {
+                _autoIntervalEnabled = true;
+                _burstCount = 0;
+              }),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
   /// Nút chụp/quay chính
   Widget _buildShutterButton() {
     if (_mode == CameraMode.photo) {
@@ -1964,7 +2196,11 @@ class _CameraScreenState extends State<CameraScreen>
           width: 80, height: 80,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
-            color: _isPhotoCountingDown ? Colors.orange : Colors.white,
+            color: _isPhotoCountingDown
+                ? Colors.orange
+                : _isAutoIntervalCapturing
+                    ? Colors.orange
+                    : Colors.white,
             border: Border.all(color: const Color(0xFFFFD700), width: 3),
           ),
           child: Center(
@@ -1972,8 +2208,12 @@ class _CameraScreenState extends State<CameraScreen>
                 ? Text('$_photoCountdown',
                     style: const TextStyle(
                       color: Colors.white, fontSize: 30, fontWeight: FontWeight.bold))
-                : _isBursting
+                : _isAutoIntervalCapturing
+                    ? const Icon(Icons.stop, color: Colors.black87, size: 36)
+                    : _isBursting
                     ? const Icon(Icons.burst_mode, color: Color(0xFFFFD700), size: 32)
+                    : _autoIntervalEnabled
+                        ? const Icon(Icons.timer, color: Colors.black87, size: 32)
                     : _burstCount > 0
                         ? const Icon(Icons.burst_mode, color: Colors.black87, size: 32)
                         : const Icon(Icons.camera_alt, color: Colors.black87, size: 36),
