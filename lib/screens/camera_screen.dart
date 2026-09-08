@@ -672,9 +672,9 @@ class _CameraScreenState extends State<CameraScreen>
         final textSpan = TextSpan(
           text: dateStr,
           style: TextStyle(
-            color: const Colors.amberAccent, // Màu vàng hổ phách
+            color: const Color(0xFFFFF59D), // Màu vàng chanh
             fontSize: fontSize,
-            fontWeight: FontWeight.light,
+            fontWeight: FontWeight.normal,
             fontFamily: 'monospace',
             shadows: const [
               Shadow(color: Colors.black, offset: Offset(2, 2), blurRadius: 4), // Bóng đổ
