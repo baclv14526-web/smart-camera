@@ -672,9 +672,9 @@ class _CameraScreenState extends State<CameraScreen>
         final textSpan = TextSpan(
           text: dateStr,
           style: TextStyle(
-            color: const Color(0xFFFFD700), // Màu vàng
+            color: const Colors.amberAccent, // Màu vàng hổ phách
             fontSize: fontSize,
-            fontWeight: FontWeight.bold,
+            fontWeight: FontWeight.light,
             fontFamily: 'monospace',
             shadows: const [
               Shadow(color: Colors.black, offset: Offset(2, 2), blurRadius: 4), // Bóng đổ
@@ -704,7 +704,7 @@ class _CameraScreenState extends State<CameraScreen>
         );
         canvas.drawRRect(
           bgRect,
-          Paint()..color = Colors.black.withAlpha(120), // Nền đen trong suốt
+          Paint()..color = Colors.black.withAlpha(60), // Nền đen trong suốt
         );
 
         textPainter.paint(canvas, Offset(x, y)); // Vẽ text timestamp
