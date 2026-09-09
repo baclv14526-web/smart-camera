@@ -276,6 +276,21 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  // ── MediaStore Scanner: Quét và đồng bộ file vào Gallery hệ thống ───────────
+  static const MethodChannel _mediaScannerChannel =
+      MethodChannel('com.example.camera_app/media_scanner');
+
+  /// Kích hoạt MediaScannerConnection để Gallery / Photos nhận diện file ngay lập tức
+  static Future<void> _scanMediaFile(String filePath) async {
+    if (!Platform.isAndroid) return;
+    try {
+      await _mediaScannerChannel.invokeMethod('scanFile', {'path': filePath});
+      debugPrint('MediaScanner: Đã đồng bộ file vào Gallery: $filePath');
+    } catch (e) {
+      debugPrint('MediaScanner error: $e');
+    }
+  }
+
   // ── Phát hiện thẻ SD Card ────────────────────────────────────────────────────────
   /// Quét các đường dẫn mount để tìm thẻ SD card vật lý
   Future<void> _detectSdCard() async {
@@ -1151,6 +1166,9 @@ class _CameraScreenState extends State<CameraScreen>
       // Ghi EXIF metadata ngầm (Fire-and-forget) không làm chậm UI/Preview
       unawaited(_writeExifMetadata(filePath));
 
+      // Đồng bộ file vào Album/Gallery hệ thống
+      unawaited(_scanMediaFile(filePath));
+
       setState(() { _isTakingPhoto = false; _lastSavedPath = filePath; _lastSavedIsVideo = false; });
       if (mounted) {
         final locText = _storageLocation == StorageLocation.sdcard ? 'thẻ nhớ SD' : 'điện thoại';
@@ -1194,6 +1212,9 @@ class _CameraScreenState extends State<CameraScreen>
 
         // Ghi EXIF metadata ngầm (Fire-and-forget): tiết kiệm ~100ms mỗi frame trong burst mode
         unawaited(_writeExifMetadata(filePath));
+
+        // Đồng bộ từng ảnh burst vào Gallery hệ thống
+        unawaited(_scanMediaFile(filePath));
 
         lastPath = filePath;
         saved++;
@@ -1274,6 +1295,9 @@ class _CameraScreenState extends State<CameraScreen>
         // Ghi EXIF metadata ngầm (Fire-and-forget)
         unawaited(_writeExifMetadata(filePath));
 
+        // Đồng bộ file vào Album/Gallery
+        unawaited(_scanMediaFile(filePath));
+
         lastPath = filePath;
         saved++;
         setState(() {
@@ -1287,6 +1311,7 @@ class _CameraScreenState extends State<CameraScreen>
         debugPrint('Auto interval frame ${i + 1} error: $e');
       }
     }
+
 
 
 
@@ -1418,6 +1443,9 @@ class _CameraScreenState extends State<CameraScreen>
       // Xóa file tạm nguồn để giải phóng storage camera
       try { srcFile.deleteSync(); } catch (_) {}
 
+      // Đồng bộ video vào Album/Gallery hệ thống
+      unawaited(_scanMediaFile(destPath));
+
       if (mounted) {
         setState(() { _lastSavedPath = destPath; _lastSavedIsVideo = true; });
         final locText = _storageLocation == StorageLocation.sdcard ? 'thẻ nhớ SD' : 'điện thoại';
@@ -1482,6 +1510,9 @@ class _CameraScreenState extends State<CameraScreen>
 
       await _streamCopyFile(srcPath, destPath);
       try { srcFile.deleteSync(); } catch (_) {}
+
+      // Đồng bộ video fallback vào Gallery
+      unawaited(_scanMediaFile(destPath));
 
       if (mounted) {
         setState(() { _lastSavedPath = destPath; _lastSavedIsVideo = true; });
