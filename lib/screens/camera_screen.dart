@@ -419,8 +419,12 @@ class _CameraScreenState extends State<CameraScreen>
         return;
       }
 
-      // Kiểm tra quyền location đã được cấp chưa
-      final permission = await Geolocator.checkPermission();
+      // Kiểm tra và xin quyền vị trí chính xác qua Geolocator nếu chưa có
+      var permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied) {
+        permission = await Geolocator.requestPermission();
+      }
+
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
         debugPrint('GPS: Quyền vị trí bị từ chối, không ghi GPS vào EXIF');
@@ -430,22 +434,32 @@ class _CameraScreenState extends State<CameraScreen>
       // Đặt cờ GPS sẵn sàng
       _gpsEnabled = true;
 
-      // Lấy tọa độ hiện tại ngay lập tức (lần đầu)
+      // 1. Thử lấy vị trí cache trước để có GPS ngay lập tức
+      try {
+        final lastKnown = await Geolocator.getLastKnownPosition();
+        if (lastKnown != null) {
+          _lastGpsPosition = lastKnown;
+          debugPrint('GPS: Vị trí LastKnown: ${lastKnown.latitude}, ${lastKnown.longitude}');
+        }
+      } catch (e) {
+        debugPrint('GPS: Lỗi lấy lastKnownPosition: $e');
+      }
+
+      // 2. Lấy tọa độ hiện tại chính xác (timeout 5s để không bị treo nếu ở trong nhà)
       try {
         final pos = await Geolocator.getCurrentPosition(
           locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.medium, // Cân bằng pin và độ chính xác
+            accuracy: LocationAccuracy.medium,
+            timeLimit: Duration(seconds: 5),
           ),
         );
         _lastGpsPosition = pos;
-        debugPrint('GPS: Tọa độ đầu tiên: ${pos.latitude}, ${pos.longitude}');
+        debugPrint('GPS: Tọa độ hiện tại: ${pos.latitude}, ${pos.longitude}');
       } catch (e) {
-        debugPrint('GPS: Lỗi lấy tọa độ đầu tiên: $e');
+        debugPrint('GPS: getCurrentPosition timeout hoặc lỗi: $e');
       }
 
-      // Đăng ký stream để cập nhật tọa độ định kỳ
-      // Không dùng setState() để tránh trigger rebuild toàn bộ widget tree mỗi khi di chuyển
-      // Tọa độ chỉ được dùng ngầm để gắn vào EXIF metadata khi chụp ảnh.
+      // 3. Đăng ký stream để cập nhật tọa độ định kỳ
       _gpsSubscription = Geolocator.getPositionStream(
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.medium,
@@ -487,8 +501,7 @@ class _CameraScreenState extends State<CameraScreen>
       await exif.writeAttribute('DateTime', exifDateStr); // Thời gian chỉnh sửa file
 
       // ── 2. THÔNG TIN THIẾT BỊ (Make, Model, Software) ──────────────────────────
-      // Lấy thông tin brand và model từ platform (Android: ro.product.brand / ro.product.model)
-      // Dùng giá trị mặc định nếu không đọc được
+      // Lấy thông tin brand và model từ platform
       final deviceBrand = Platform.isAndroid ? 'Android Device' : 'iOS Device';
       final cameraFacing = _isFrontCamera ? 'Front' : 'Rear';
 
@@ -498,36 +511,43 @@ class _CameraScreenState extends State<CameraScreen>
 
       // ── 3. ORIENTATION (Chiều ảnh) ───────────────────────────────────────────────
       // Orientation = 1 (Normal): App đã xử lý rotation/mirror, ảnh đã đúng chiều.
-      // Các giá trị: 1=Normal, 3=180°, 6=90°CW, 8=90°CCW, 2/4/5/7=với flip
       await exif.writeAttribute('Orientation', '1');
 
       // ── 4. GPS COORDINATES (Tọa độ địa lý) ────────────────────────────────────
-      final gpsPos = _lastGpsPosition; // Lấy tọa độ GPS gần nhất đã được cache
-      if (gpsPos != null && _gpsEnabled) {
-        // Latitude: convert từ decimal degrees sang DMS (Degrees/Minutes/Seconds) dạng rational
-        // native_exif nhận chuỗi dạng "21/1,1/1,665/100" (21°01'6.65")
+      Position? gpsPos = _lastGpsPosition;
+      if (gpsPos == null && _gpsEnabled) {
+        try {
+          gpsPos = await Geolocator.getLastKnownPosition();
+          if (gpsPos != null) _lastGpsPosition = gpsPos;
+        } catch (_) {}
+      }
+
+      if (gpsPos != null) {
+        // Latitude: convert từ decimal degrees sang DMS (Degrees/Minutes/Seconds) chuẩn EXIF/Android
         final lat = gpsPos.latitude.abs();
         final latDeg = lat.floor();
-        final latMin = ((lat - latDeg) * 60).floor();
-        final latSec = (((lat - latDeg) * 60 - latMin) * 60 * 100).round();
+        final latMinTotal = (lat - latDeg) * 60;
+        final latMin = latMinTotal.floor();
+        final latSec = ((latMinTotal - latMin) * 60 * 1000).round();
         final latRef = gpsPos.latitude >= 0 ? 'N' : 'S'; // Bắc/Nam
 
         final lon = gpsPos.longitude.abs();
         final lonDeg = lon.floor();
-        final lonMin = ((lon - lonDeg) * 60).floor();
-        final lonSec = (((lon - lonDeg) * 60 - lonMin) * 60 * 100).round();
+        final lonMinTotal = (lon - lonDeg) * 60;
+        final lonMin = lonMinTotal.floor();
+        final lonSec = ((lonMinTotal - lonMin) * 60 * 1000).round();
         final lonRef = gpsPos.longitude >= 0 ? 'E' : 'W'; // Đông/Tây
 
-        // Ghi Latitude và Longitude vào EXIF dưới dạng rational numbers
-        await exif.writeAttribute('GPSLatitude', '$latDeg/1,$latMin/1,$latSec/100');
+        // Ghi Latitude và Longitude vào EXIF theo chuẩn rational DMS ("deg/1,min/1,sec/1000")
+        await exif.writeAttribute('GPSLatitude', '$latDeg/1,$latMin/1,$latSec/1000');
         await exif.writeAttribute('GPSLatitudeRef', latRef);
-        await exif.writeAttribute('GPSLongitude', '$lonDeg/1,$lonMin/1,$lonSec/100');
+        await exif.writeAttribute('GPSLongitude', '$lonDeg/1,$lonMin/1,$lonSec/1000');
         await exif.writeAttribute('GPSLongitudeRef', lonRef);
 
         // Altitude (độ cao): tính bằng mét, dạng rational "1000/10" = 100.0m
-        final altM = gpsPos.altitude.abs() * 10; // Nhân 10 để giữ 1 chữ số thập phân
+        final altM = (gpsPos.altitude.abs() * 10).round();
         final altRef = gpsPos.altitude >= 0 ? '0' : '1'; // 0 = trên mực nước biển, 1 = dưới
-        await exif.writeAttribute('GPSAltitude', '${altM.round()}/10');
+        await exif.writeAttribute('GPSAltitude', '$altM/10');
         await exif.writeAttribute('GPSAltitudeRef', altRef);
 
         // GPS Timestamp (UTC): dạng "HH/1,MM/1,SS/1"
@@ -546,11 +566,6 @@ class _CameraScreenState extends State<CameraScreen>
       }
 
       // ── 5. THÔNG SỐ KỸ THUẬT (ISO, Shutter Speed, Aperture, Focal Length) ────
-      // Flutter camera package không expose trực tiếp ISO/ExposureTime/FNumber,
-      // nhưng ta có thể ghi các giá trị điển hình dựa trên chế độ đang dùng.
-      // Đây là best-effort: ảnh thực tế có thể khác tùy điều kiện ánh sáng.
-      // TODO: Khi Flutter camera API hỗ trợ đọc metadata exposure, cập nhật ở đây.
-
       // FocalLength: giá trị điển hình cho smartphone camera chính (~4.3mm)
       await exif.writeAttribute('FocalLength', '43/10'); // 4.3mm dạng rational
 
@@ -564,7 +579,6 @@ class _CameraScreenState extends State<CameraScreen>
       await exif.writeAttribute('MeteringMode', '5');
 
       // Flash: 0 = Flash did not fire (tắt), 1 = Flash fired (bật)
-      // Dùng _flashMode để xác định flash có bắn không
       final flashFired = (_flashMode == FlashMode.always || _flashMode == FlashMode.torch) ? '1' : '0';
       await exif.writeAttribute('Flash', flashFired);
 
