@@ -15,6 +15,7 @@ import '../widgets/quality_selector.dart'; // Widget chọn chất lượng
 import '../widgets/storage_selector.dart'; // Widget chọn bộ nhớ
 import '../widgets/timestamp_selector.dart'; // Widget chọn timestamp
 import '../widgets/gps_watermark_selector.dart'; // Widget chọn GPS watermark
+import '../widgets/auto_enhance_selector.dart'; // Widget chọn Tự động cân bằng màu & ánh sáng
 import '../widgets/hdr_selector.dart'; // Widget chọn HDR
 import '../widgets/filter_selector.dart'; // Widget chọn filter
 import '../widgets/stabilization_selector.dart'; // Widget chọn chống rung
@@ -124,6 +125,35 @@ class _CameraScreenState extends State<CameraScreen>
   // ── Timestamp & GPS watermark ────────────────────────────────────────────────
   bool _showTimestamp = true; // Hiển thị timestamp trên ảnh hay không
   bool _showGpsWatermark = true; // Hiển thị tọa độ GPS trên ảnh hay không (phía trên timestamp, không nền)
+
+  // ── Tự động tối ưu màu sắc & ánh sáng (Auto Enhance AI) ────────────────────
+  bool _autoEnhance = true; // Tự động cân bằng màu sắc & ánh sáng đẹp nhất cho camera trước & sau
+
+  /// Ma trận màu tối ưu ánh sáng & màu sắc cho Camera sau (Phong cảnh, chân dung ngoại cảnh, vật thể)
+  /// - Cân bằng phơi sáng & mở rộng dải tương phản nhẹ
+  /// - Tăng độ rực màu tự nhiên (vibrance: tăng nhẹ kênh màu để ảnh trong trẻo, không bị ám vàng/xám)
+  /// - Tăng nhẹ độ sáng shadow để chi tiết vùng tối rõ nét hơn
+  static const List<double> _rearAutoEnhanceMatrix = <double>[
+    1.08, -0.02, -0.01, 0.0, 4.0,  // Red: Tăng độ tương phản & độ sâu
+    -0.01, 1.08, -0.01, 0.0, 4.0,  // Green: Cân bằng màu lá cây/thiên nhiên tươi tắn
+    -0.01, -0.01, 1.10, 0.0, 6.0,  // Blue: Bầu trời & nước trong xanh hơn
+    0.0,   0.0,   0.0,  1.0, 0.0,  // Alpha
+  ];
+
+  /// Ma trận màu tối ưu ánh sáng & màu sắc cho Camera trước (Selfie / Chân dung tự sướng)
+  /// - Làm sáng nhẹ tông da tự nhiên, xóa bỏ vùng tối dưới mắt/khuất sáng (+10 level sáng)
+  /// - Bổ sung sắc hồng đào nhẹ nhàng (rosy warm skin tone) giúp khuôn mặt rạng rỡ, hồng hào
+  /// - Giảm độ gắt vùng cháy sáng để khuôn mặt mềm mại, mịn màng hơn
+  static const List<double> _frontAutoEnhanceMatrix = <double>[
+    1.06, 0.01, 0.01, 0.0, 10.0,  // Red: Tông hồng hào rạng rỡ
+    0.01, 1.04, 0.01, 0.0, 8.0,   // Green: Tự nhiên, sáng sủa
+    0.01, 0.01, 1.02, 0.0, 10.0,  // Blue: Trắng sáng nhẹ, không bị vàng vọt
+    0.0,  0.0,  0.0,  1.0, 0.0,   // Alpha
+  ];
+
+  /// Lấy ma trận Auto Enhance tương ứng với camera trước hoặc sau
+  List<double> get _currentAutoEnhanceMatrix =>
+      _isFrontCamera ? _frontAutoEnhanceMatrix : _rearAutoEnhanceMatrix;
 
   // ── Chế độ HDR ─────────────────────────────────────────────────────────────────
   HdrMode _hdrMode = HdrMode.auto; // Chế độ HDR (tắt, bật, auto)
@@ -263,6 +293,8 @@ class _CameraScreenState extends State<CameraScreen>
         _showTimestamp = prefs.getBool('pref_show_timestamp') ?? _showTimestamp;
         // GPS Watermark
         _showGpsWatermark = prefs.getBool('pref_show_gps_watermark') ?? _showGpsWatermark;
+        // Auto Enhance AI
+        _autoEnhance = prefs.getBool('pref_auto_enhance') ?? _autoEnhance;
         // Mirror Front Camera
         _mirrorFrontCamera = prefs.getBool('pref_mirror_front_camera') ?? _mirrorFrontCamera;
         // Photo Timer
@@ -651,6 +683,15 @@ class _CameraScreenState extends State<CameraScreen>
         debugPrint('Zoom level query error: $e');
       }
 
+      // Cấu hình tự động đo sáng (Auto Exposure) và tự động lấy nét (Auto Focus)
+      // giúp cân bằng ánh sáng và màu sắc tối ưu nhất ngay khi khởi động camera trước & sau
+      try {
+        await controller.setFocusMode(FocusMode.auto);
+        await controller.setExposureMode(ExposureMode.auto);
+      } catch (e) {
+        debugPrint('Auto focus/exposure init error: $e');
+      }
+
       if (mounted) setState(() => _isInitializing = false);
     } on CameraException catch (e) {
       debugPrint('Camera init error: $e');
@@ -1013,11 +1054,12 @@ class _CameraScreenState extends State<CameraScreen>
     final applyGpsWatermark = _showGpsWatermark && (_lastGpsPosition != null); // Có hiển thị GPS watermark không
     final filterMatrix = FilterHelper.getMatrix(_selectedFilter); // Matrix filter màu
     final applyFilter = filterMatrix != null; // Có filter nào được chọn không
+    final applyAutoEnhance = _autoEnhance && !applyFilter; // Tự động cân bằng màu & ánh sáng đẹp nhất
     // Lật ảnh chụp: NGƯỢC với setting để khử lật tự động của camera hardware
     final applyMirror = _isFrontCamera && !_mirrorFrontCamera;
 
     // Nếu không có hiệu ứng nào, chỉ copy file (JPEG gốc từ camera giữ nguyên)
-    if (!applyHdr && !applyTimestamp && !applyGpsWatermark && !applyFilter && !applyMirror) {
+    if (!applyHdr && !applyTimestamp && !applyGpsWatermark && !applyFilter && !applyAutoEnhance && !applyMirror) {
       await File(sourcePath).copy(destPath);
       return;
     }
@@ -1040,10 +1082,12 @@ class _CameraScreenState extends State<CameraScreen>
         canvas.scale(-1.0, 1.0); // Lật ngang
       }
 
-      // 1. Layer ảnh gốc (với filter màu/beauty nếu được chọn)
+      // 1. Layer ảnh gốc (với filter màu/beauty nếu được chọn, hoặc Auto Enhance tối ưu màu & ánh sáng)
       final basePaint = Paint();
       if (applyFilter) {
-        basePaint.colorFilter = ColorFilter.matrix(filterMatrix); // Áp dụng filter
+        basePaint.colorFilter = ColorFilter.matrix(filterMatrix); // Áp dụng filter thủ công
+      } else if (applyAutoEnhance) {
+        basePaint.colorFilter = ColorFilter.matrix(_currentAutoEnhanceMatrix); // Áp dụng Auto Enhance AI
       }
       canvas.drawImage(image, Offset.zero, basePaint); // Vẽ ảnh gốc
 
@@ -2013,11 +2057,16 @@ class _CameraScreenState extends State<CameraScreen>
       );
     }
 
-    // Áp dụng filter màu/beauty real-time 60 FPS GPU
+    // Áp dụng filter màu/beauty real-time 60 FPS GPU (hoặc Auto Enhance AI cân bằng màu & ánh sáng)
     final matrix = FilterHelper.getMatrix(_selectedFilter);
     if (matrix != null) {
       preview = ColorFiltered(
         colorFilter: ColorFilter.matrix(matrix),
+        child: preview,
+      );
+    } else if (_autoEnhance) {
+      preview = ColorFiltered(
+        colorFilter: ColorFilter.matrix(_currentAutoEnhanceMatrix),
         child: preview,
       );
     }
@@ -2320,6 +2369,32 @@ class _CameraScreenState extends State<CameraScreen>
                 ),
               ),
             ],
+            // Badge Auto Enhance AI (khi không có filter thủ công nào đang bật)
+            if (_autoEnhance && _selectedFilter == CameraFilter.none) ...[
+              Container(
+                margin: const EdgeInsets.only(right: 6),
+                padding: const EdgeInsets.symmetric(horizontal: 7, vertical: 4),
+                decoration: BoxDecoration(
+                  color: Colors.deepPurple.withAlpha(200),
+                  borderRadius: BorderRadius.circular(12),
+                  boxShadow: const [
+                    BoxShadow(color: Colors.black38, blurRadius: 4, offset: Offset(0, 1)),
+                  ],
+                ),
+                child: const Row(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Icon(Icons.auto_fix_high, size: 11, color: Colors.white),
+                    SizedBox(width: 3),
+                    Text(
+                      'AI ✨',
+                      style: TextStyle(
+                        color: Colors.white, fontSize: 10, fontWeight: FontWeight.w800),
+                    ),
+                  ],
+                ),
+              ),
+            ],
             // Badge HDR (chỉ chế độ ảnh)
             if (_mode == CameraMode.photo && _hdrMode != HdrMode.off) ...[
               Container(
@@ -2536,6 +2611,15 @@ class _CameraScreenState extends State<CameraScreen>
                   onChanged: (v) {
                     setState(() => _showGpsWatermark = v);
                     _savePreference('pref_show_gps_watermark', v);
+                  },
+                ),
+                const SizedBox(height: 18),
+                // Tự động cân bằng màu sắc & ánh sáng (Auto Enhance AI)
+                AutoEnhanceSelector(
+                  enabled: _autoEnhance,
+                  onChanged: (v) {
+                    setState(() => _autoEnhance = v);
+                    _savePreference('pref_auto_enhance', v);
                   },
                 ),
               ] else ...[
