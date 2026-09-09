@@ -1200,7 +1200,7 @@ class _CameraScreenState extends State<CameraScreen>
       image?.dispose();
       outputImage?.dispose();
     }
-
+  }
 
   // ── Isolate Task: Encode ảnh JPEG trên background thread ────────────────────
   static Uint8List _encodeJpgTask(Map<String, dynamic> params) {
