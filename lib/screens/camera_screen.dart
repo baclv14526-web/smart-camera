@@ -694,7 +694,140 @@ class _CameraScreenState extends State<CameraScreen>
       await _controller!.setZoomLevel(targetZoom); // Áp dụng zoom
     } catch (e) {
       debugPrint('Set zoom error: $e');
-          // Thư mục công khai chuẩn trên SD Card (DCIM / Pictures / Movies / CameraApp2026)
+    }
+  }
+
+  // ── Chuyển camera (trước/sau) ─────────────────────────────────────────────────────────────
+  /// Chuyển giữa camera sau và camera trước
+  Future<void> _switchCamera() async {
+    if (_isAutoIntervalCapturing) _stopAutoIntervalCapture();
+    if (widget.cameras.length < 2) return; // Cần ít nhất 2 camera
+    final nextIndex = _cameraIndex == 0 ? 1 : 0; // Toggle index
+    final nextIsFront = nextIndex < widget.cameras.length &&
+        widget.cameras[nextIndex].lensDirection == CameraLensDirection.front;
+    setState(() {
+      _cameraIndex = nextIndex;
+      _isInitializing = true;
+    });
+    await _initCamera(); // Khởi tạo lại camera mới
+  }
+
+  // ── Chuyển chế độ HDR ────────────────────────────────────────────────────────
+  /// Toggle giữa 3 chế độ: Auto → On → Off → Auto
+  void _cycleHdrMode() {
+    setState(() {
+      switch (_hdrMode) {
+        case HdrMode.auto:
+          _hdrMode = HdrMode.on; // Chuyển sang HDR bật
+          break;
+        case HdrMode.on:
+          _hdrMode = HdrMode.off; // Chuyển sang HDR tắt
+          break;
+        case HdrMode.off:
+          _hdrMode = HdrMode.auto; // Chuyển sang HDR auto
+          break;
+      }
+      _savePreference('pref_hdr_mode', _hdrMode.index);
+    });
+  }
+
+  // ── Chuyển chế độ chống rung (OIS / EIS / Super Steady) ─────────────────────────
+  /// Toggle giữa 3 chế độ: Off → Standard → Super Steady → Off
+  void _cycleStabilizationMode() {
+    setState(() {
+      switch (_stabilizationMode) {
+        case StabilizationMode.off:
+          _stabilizationMode = StabilizationMode.standard; // Bật OIS chuẩn
+          break;
+        case StabilizationMode.standard:
+          _stabilizationMode = StabilizationMode.superSteady; // Bật Super Steady
+          break;
+        case StabilizationMode.superSteady:
+          _stabilizationMode = StabilizationMode.off; // Tắt chống rung
+          break;
+      }
+      _savePreference('pref_stabilization_mode', _stabilizationMode.index);
+    });
+    _applyStabilization(); // Áp dụng chế độ mới
+  }
+
+  /// Áp dụng chế độ chống rung lên camera
+  Future<void> _applyStabilization() async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+    try {
+      if (_stabilizationMode != StabilizationMode.off) {
+        await _controller!.setFocusMode(FocusMode.auto); // Tự động lấy nét
+        await _controller!.setExposureMode(ExposureMode.auto); // Tự động phơi sáng
+      }
+    } catch (e) {
+      debugPrint('Stabilization apply error: $e');
+    }
+  }
+
+  // ── Chuyển chế độ Flash ─────────────────────────────────────────────────────────────
+  /// Toggle flash: chụp ảnh (off → auto → always), video (off → torch)
+  void _toggleFlash() {
+    if (_mode == CameraMode.photo) {
+      // Chế độ chụp ảnh: Tắt → Auto → Luôn bật → Tắt
+      final modes = [FlashMode.off, FlashMode.auto, FlashMode.always];
+      final next = modes[(modes.indexOf(_flashMode) + 1) % modes.length];
+      setState(() => _flashMode = next);
+      _controller?.setFlashMode(next);
+    } else {
+      // Chế độ video: Tắt → Torch (đèn pin) → Tắt
+      final next = _flashMode == FlashMode.torch || _flashMode == FlashMode.always
+          ? FlashMode.off
+          : FlashMode.torch;
+      setState(() => _flashMode = next);
+      _controller?.setFlashMode(next);
+    }
+  }
+
+  /// Lấy icon tương ứng với chế độ flash hiện tại
+  IconData get _flashIcon {
+    switch (_flashMode) {
+      case FlashMode.always:
+      case FlashMode.torch:
+        return Icons.flash_on; // Icon flash bật
+      case FlashMode.auto:
+        return Icons.flash_auto; // Icon flash auto
+      default:
+        return Icons.flash_off; // Icon flash tắt
+    }
+  }
+
+  // ── Helper chuyển đổi thời gian ──────────────────────────────────────────────────────────
+  /// Chuyển chuỗi timer thành số giây
+  int _photoTimerSeconds(String s) =>
+      {'3s': 3, '5s': 5, '10s': 10, '15s': 15}[s] ?? 0;
+
+  /// Chuyển chuỗi thời lượng video thành số giây
+  int _videoDurationSeconds(String s) =>
+      {'15s': 15, '30s': 30, '1 phút': 60, '3 phút': 180, '5 phút': 300, '10 phút': 600}[s] ?? 0;
+
+  /// Format số giây thành dạng MM:SS
+  String _formatDuration(int s) =>
+      '${(s ~/ 60).toString().padLeft(2, '0')}:${(s % 60).toString().padLeft(2, '0')}';
+
+  // ── Lấy thư mục lưu file ────────────────────────────────────────────────────────────
+  /// Tìm và xác thực thư mục có thể ghi file (ưu tiên SD card nếu được chọn)
+  /// Sử dụng biến cache để tránh kiểm tra I/O lặp lại khi chụp burst hoặc auto-interval
+  Future<String> _getSaveDir(bool isVideo) async {
+    final cached = isVideo ? _cachedVideoSaveDir : _cachedPhotoSaveDir;
+    if (cached != null && Directory(cached).existsSync()) {
+      return cached;
+    }
+
+    const appFolder = 'CameraApp2026'; // Tên thư mục app
+    final mediaTypeFolder = isVideo ? 'Movies' : 'Pictures'; // Thư mục theo loại media
+    String resolvedPath = '';
+
+    if (Platform.isAndroid) {
+      // ── 1. Nếu chọn thẻ SD Card ──
+      if (_storageLocation == StorageLocation.sdcard) {
+        final sdCandidates = <String>[];
+
+        // Thư mục công khai chuẩn trên SD Card (DCIM / Pictures / Movies / CameraApp2026)
         if (_sdcardRootPath != null) {
           sdCandidates.add(path.join(_sdcardRootPath!, 'DCIM', appFolder));
           sdCandidates.add(path.join(_sdcardRootPath!, mediaTypeFolder, appFolder));
@@ -1324,6 +1457,11 @@ class _CameraScreenState extends State<CameraScreen>
     // Hiển thị tiến trình lưu (quan trọng cho file lớn trên SD card)
     if (mounted) {
       _showSnackbar('💾 Đang lưu video, vui lòng chờ...', Colors.blueGrey);
+    }
+
+    if (xFile == null) {
+      if (mounted) _showSnackbar('❌ Không lấy được dữ liệu video', Colors.red);
+      return;
     }
 
     try {
