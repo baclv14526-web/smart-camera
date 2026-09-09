@@ -4,6 +4,7 @@ import 'dart:io'; // Xử lý file và directory
 import 'dart:ui' as ui; // Xử lý ảnh và canvas
 import 'package:flutter/foundation.dart'; // Isolate compute() để encode ảnh trên background thread
 import 'package:flutter/material.dart'; // UI Flutter
+import 'package:flutter/services.dart'; // HapticFeedback và system services
 import 'package:camera/camera.dart'; // Camera Flutter
 import 'package:path_provider/path_provider.dart'; // Lấy đường dẫn thư mục hệ thống
 import 'package:path/path.dart' as path; // Xử lý đường dẫn file
@@ -19,6 +20,7 @@ import '../widgets/stabilization_selector.dart'; // Widget chọn chống rung
 import '../widgets/zoom_selector.dart'; // Widget chọn zoom
 import '../widgets/capture_sound_selector.dart'; // Widget âm thanh chụp/quay
 import '../services/capture_sound_service.dart'; // Phát tiếng tách tách / mp3
+import 'package:shared_preferences/shared_preferences.dart'; // Lưu trữ cấu hình người dùng
 import 'preview_screen.dart'; // Màn hình xem ảnh/video
 // ─── EXIF METADATA IMPORTS ───────────────────────────────────────────────────
 import 'package:native_exif/native_exif.dart'; // Ghi EXIF metadata vào file JPEG
@@ -39,7 +41,7 @@ class CameraScreen extends StatefulWidget {
 
 // State của màn hình camera, theo dõi lifecycle của app
 class _CameraScreenState extends State<CameraScreen>
-    with WidgetsBindingObserver {
+    with WidgetsBindingObserver, TickerProviderStateMixin {
   // ── Controller & Camera ──────────────────────────────────────────────────────────────
   CameraController? _controller; // Controller điều khiển camera
   int _cameraIndex = 0; // Index của camera đang dùng (0: sau, 1: trước)
@@ -148,32 +150,39 @@ class _CameraScreenState extends State<CameraScreen>
   // Stream subscription theo dõi GPS liên tục ở chế độ tiết kiệm pin
   StreamSubscription<Position>? _gpsSubscription;
 
+  // ── Tap to Focus & Exposure Ring ───────────────────────────────────────────────
+  Offset? _focusPointScreen; // Tọa độ pixel trên màn hình để vẽ focus ring
+  late AnimationController _focusAnimController; // Controller điều khiển hiệu ứng scale & fade
+  late Animation<double> _focusScaleAnim;
+  late Animation<double> _focusOpacityAnim;
+  Timer? _focusHideTimer; // Timer ẩn vòng tròn lấy nét sau 1.5s
+
   // ── Lifecycle methods ────────────────────────────────────────────────────────────────────
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this); // Đăng ký observer để theo dõi lifecycle
+    
+    // Khởi tạo AnimationController cho Focus Ring
+    _focusAnimController = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 300),
+    );
+    _focusScaleAnim = Tween<double>(begin: 1.5, end: 1.0).animate(
+      CurvedAnimation(parent: _focusAnimController, curve: Curves.easeOutBack),
+    );
+    _focusOpacityAnim = Tween<double>(begin: 0.0, end: 1.0).animate(
+      CurvedAnimation(parent: _focusAnimController, curve: Curves.easeIn),
+    );
+
     _captureSound.init().then((_) {
       if (mounted) setState(() {});
     });
+    _loadSavedPreferences(); // Khôi phục các cài đặt đã lưu của người dùng
     _requestPermissions(); // Yêu cầu quyền truy cập camera, microphone, storage
     _detectSdCard(); // Phát hiện thẻ SD card
     // Khởi động GPS stream sau khi đã xin quyền location (gọi sau _requestPermissions)
     // _initGps() sẽ được gọi bên trong _requestPermissions() sau khi có đủ quyền
-  }
-
-  @override
-  void dispose() {
-    WidgetsBinding.instance.removeObserver(this); // Hủy đăng ký observer
-    _photoCountdownTimer?.cancel(); // Hủy timer đếm ngược
-    _autoIntervalWaitTimer?.cancel();
-    _recordingTimer?.cancel(); // Hủy timer đếm thời gian quay
-    _autoStopTimer?.cancel(); // Hủy timer tự động dừng
-    _controller?.dispose(); // Giải phóng camera controller
-    WakelockPlus.disable(); // Tắt chế độ giữ màn hình
-    // Hủy GPS stream subscription để tránh memory leak
-    _gpsSubscription?.cancel();
-    super.dispose();
   }
 
   @override
@@ -185,6 +194,85 @@ class _CameraScreenState extends State<CameraScreen>
       _controller?.dispose(); // Khi app vào background, giải phóng camera
     } else if (state == AppLifecycleState.resumed) {
       _initCamera(); // Khi app trở lại foreground, khởi tạo lại camera
+    }
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this); // Hủy đăng ký observer
+    _photoCountdownTimer?.cancel(); // Hủy timer đếm ngược
+    _autoIntervalWaitTimer?.cancel();
+    _recordingTimer?.cancel(); // Hủy timer đếm thời gian quay
+    _autoStopTimer?.cancel(); // Hủy timer tự động dừng
+    _focusHideTimer?.cancel(); // Hủy timer focus ring
+    _focusAnimController.dispose(); // Giải phóng animation controller
+    _controller?.dispose(); // Giải phóng camera controller
+    WakelockPlus.disable(); // Tắt chế độ giữ màn hình
+    // Hủy GPS stream subscription để tránh memory leak
+    _gpsSubscription?.cancel();
+    super.dispose();
+  }
+
+  // ── Khôi phục & Lưu cài đặt người dùng (SharedPreferences) ───────────────────
+  Future<void> _loadSavedPreferences() async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (!mounted) return;
+      setState(() {
+        // Filter
+        final filterIdx = prefs.getInt('pref_selected_filter');
+        if (filterIdx != null && filterIdx >= 0 && filterIdx < CameraFilter.values.length) {
+          _selectedFilter = CameraFilter.values[filterIdx];
+        }
+        // Stabilization
+        final stabIdx = prefs.getInt('pref_stabilization_mode');
+        if (stabIdx != null && stabIdx >= 0 && stabIdx < StabilizationMode.values.length) {
+          _stabilizationMode = StabilizationMode.values[stabIdx];
+        }
+        // HDR
+        final hdrIdx = prefs.getInt('pref_hdr_mode');
+        if (hdrIdx != null && hdrIdx >= 0 && hdrIdx < HdrMode.values.length) {
+          _hdrMode = HdrMode.values[hdrIdx];
+        }
+        // Grid
+        _showGrid = prefs.getBool('pref_show_grid') ?? _showGrid;
+        // Timestamp
+        _showTimestamp = prefs.getBool('pref_show_timestamp') ?? _showTimestamp;
+        // Mirror Front Camera
+        _mirrorFrontCamera = prefs.getBool('pref_mirror_front_camera') ?? _mirrorFrontCamera;
+        // Photo Timer
+        _selectedPhotoTimer = prefs.getString('pref_photo_timer') ?? _selectedPhotoTimer;
+        // Video Duration
+        _selectedVideoDuration = prefs.getString('pref_video_duration') ?? _selectedVideoDuration;
+        // Storage Location
+        final storageIdx = prefs.getInt('pref_storage_location');
+        if (storageIdx != null && storageIdx >= 0 && storageIdx < StorageLocation.values.length) {
+          _storageLocation = StorageLocation.values[storageIdx];
+        }
+        // Burst Count
+        _burstCount = prefs.getInt('pref_burst_count') ?? _burstCount;
+        // Auto Interval
+        _autoIntervalEnabled = prefs.getBool('pref_auto_interval') ?? _autoIntervalEnabled;
+      });
+    } catch (e) {
+      debugPrint('Load preferences error: $e');
+    }
+  }
+
+  Future<void> _savePreference<T>(String key, T value) async {
+    try {
+      final prefs = await SharedPreferences.getInstance();
+      if (value is bool) {
+        await prefs.setBool(key, value);
+      } else if (value is int) {
+        await prefs.setInt(key, value);
+      } else if (value is String) {
+        await prefs.setString(key, value);
+      } else if (value is double) {
+        await prefs.setDouble(key, value);
+      }
+    } catch (e) {
+      debugPrint('Save preference $key error: $e');
     }
   }
 
@@ -518,6 +606,51 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
+  // ── Chạm để lấy nét & đo sáng (Tap to Focus & Exposure) ─────────────────────
+  /// Đặt điểm lấy nét (Focus point) và điểm đo sáng (Exposure point) theo tọa độ chạm của người dùng
+  Future<void> _onTapToFocus(TapDownDetails details, BoxConstraints constraints) async {
+    if (_controller == null || !_controller!.value.isInitialized) return;
+
+    final screenOffset = details.localPosition;
+    final double xRatio = (screenOffset.dx / constraints.maxWidth).clamp(0.0, 1.0);
+    final double yRatio = (screenOffset.dy / constraints.maxHeight).clamp(0.0, 1.0);
+    final relativePoint = Offset(xRatio, yRatio);
+
+    // Kích hoạt rung phản hồi nhẹ
+    HapticFeedback.lightImpact();
+
+    // Hiển thị vòng tròn lấy nét màu vàng
+    setState(() {
+      _focusPointScreen = screenOffset;
+    });
+
+    _focusAnimController.forward(from: 0.0);
+    _focusHideTimer?.cancel();
+    _focusHideTimer = Timer(const Duration(milliseconds: 1500), () {
+      if (mounted) {
+        _focusAnimController.reverse().then((_) {
+          if (mounted) setState(() => _focusPointScreen = null);
+        });
+      }
+    });
+
+    try {
+      // Đặt điểm lấy nét & chế độ auto focus
+      if (_controller!.value.focusPointSupported) {
+        await _controller!.setFocusPoint(relativePoint);
+      }
+      await _controller!.setFocusMode(FocusMode.auto);
+
+      // Đặt điểm đo sáng & chế độ auto exposure
+      if (_controller!.value.exposurePointSupported) {
+        await _controller!.setExposurePoint(relativePoint);
+      }
+      await _controller!.setExposureMode(ExposureMode.auto);
+    } catch (e) {
+      debugPrint('Set focus/exposure point error: $e');
+    }
+  }
+
   // ── Đặt mức zoom (0.5x, 1x, 2x, 4x, 10x) ──────────────────────────────────
   /// Thay đổi mức zoom, clamp trong khoảng cho phép
   Future<void> _setZoom(double zoom) async {
@@ -561,6 +694,7 @@ class _CameraScreenState extends State<CameraScreen>
           _hdrMode = HdrMode.auto; // Chuyển sang HDR auto
           break;
       }
+      _savePreference('pref_hdr_mode', _hdrMode.index);
     });
   }
 
@@ -579,6 +713,7 @@ class _CameraScreenState extends State<CameraScreen>
           _stabilizationMode = StabilizationMode.off; // Tắt chống rung
           break;
       }
+      _savePreference('pref_stabilization_mode', _stabilizationMode.index);
     });
     _applyStabilization(); // Áp dụng chế độ mới
   }
@@ -1010,6 +1145,9 @@ class _CameraScreenState extends State<CameraScreen>
 
       await _processCapturedPhoto(xFile.path, filePath); // Xử lý ảnh (filter, HDR, timestamp, mirror)
 
+      // Xóa file tạm thời trong cache của camera để ngăn rác bộ nhớ
+      try { File(xFile.path).deleteSync(); } catch (_) {}
+
       // Ghi EXIF metadata ngầm (Fire-and-forget) không làm chậm UI/Preview
       unawaited(_writeExifMetadata(filePath));
 
@@ -1050,6 +1188,9 @@ class _CameraScreenState extends State<CameraScreen>
         final filePath = path.join(dir, 'BURST_${DateTime.now().millisecondsSinceEpoch}_${i + 1}.jpg'); // Tên file
 
         await _processCapturedPhoto(xFile.path, filePath); // Xử lý ảnh
+
+        // Xóa file tạm thời của frame chụp
+        try { File(xFile.path).deleteSync(); } catch (_) {}
 
         // Ghi EXIF metadata ngầm (Fire-and-forget): tiết kiệm ~100ms mỗi frame trong burst mode
         unawaited(_writeExifMetadata(filePath));
@@ -1127,6 +1268,9 @@ class _CameraScreenState extends State<CameraScreen>
         );
         await _processCapturedPhoto(xFile.path, filePath);
 
+        // Xóa file tạm thời
+        try { File(xFile.path).deleteSync(); } catch (_) {}
+
         // Ghi EXIF metadata ngầm (Fire-and-forget)
         unawaited(_writeExifMetadata(filePath));
 
@@ -1143,6 +1287,7 @@ class _CameraScreenState extends State<CameraScreen>
         debugPrint('Auto interval frame ${i + 1} error: $e');
       }
     }
+
 
 
     _autoIntervalWaitTimer?.cancel();
@@ -1773,21 +1918,27 @@ class _CameraScreenState extends State<CameraScreen>
     // Không phụ thuộc setting lật ảnh
     // (Đã xóa logic lật preview)
 
-    // Gesture Pinch to Zoom
-    return GestureDetector(
-      onScaleStart: (details) {
-        _baseScale = _currentZoom; // Lưu scale cơ bản khi bắt đầu pinch
+    // Gesture Tap to Focus & Pinch to Zoom
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        return GestureDetector(
+          behavior: HitTestBehavior.opaque,
+          onTapDown: (details) => _onTapToFocus(details, constraints),
+          onScaleStart: (details) {
+            _baseScale = _currentZoom; // Lưu scale cơ bản khi bắt đầu pinch
+          },
+          onScaleUpdate: (details) {
+            final newZoom = (_baseScale * details.scale).clamp(_minAvailableZoom, _maxAvailableZoom);
+            _setZoom(newZoom); // Cập nhật zoom
+          },
+          child: preview,
+        );
       },
-      onScaleUpdate: (details) {
-        final newZoom = (_baseScale * details.scale).clamp(_minAvailableZoom, _maxAvailableZoom);
-        _setZoom(newZoom); // Cập nhật zoom
-      },
-      child: preview,
     );
   }
 
   // ── Khu vực preview ──────────────────────────────────────────────────────────────
-  /// Xây dựng khu vực preview với các overlay: lưới, flash, countdown, badges, settings
+  /// Xây dựng khu vực preview với các overlay: lưới, flash, countdown, badges, settings, focus ring
   Widget _buildPreviewArea() {
     if (_isInitializing) {
       return const Center(child: CircularProgressIndicator(color: Color(0xFFFFD700)));
@@ -1805,6 +1956,54 @@ class _CameraScreenState extends State<CameraScreen>
         // ── Preview camera: lấp đầy màn hình, giữ tỷ lệ sensor (không méo) ──
         Positioned.fill(
           child: _buildCameraPreview(),
+        ),
+
+      // Focus Ring Animation (Vòng tròn lấy nét và đo sáng màu vàng)
+      if (_focusPointScreen != null)
+        Positioned(
+          left: _focusPointScreen!.dx - 35,
+          top: _focusPointScreen!.dy - 35,
+          child: IgnorePointer(
+            child: AnimatedBuilder(
+              animation: _focusAnimController,
+              builder: (context, child) {
+                return Opacity(
+                  opacity: _focusOpacityAnim.value,
+                  child: Transform.scale(
+                    scale: _focusScaleAnim.value,
+                    child: Container(
+                      width: 70,
+                      height: 70,
+                      decoration: BoxDecoration(
+                        shape: BoxShape.circle,
+                        border: Border.all(
+                          color: const Color(0xFFFFD700),
+                          width: 1.8,
+                        ),
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(0xFFFFD700).withAlpha(100),
+                            blurRadius: 8,
+                            spreadRadius: 1,
+                          ),
+                        ],
+                      ),
+                      child: Center(
+                        child: Container(
+                          width: 6,
+                          height: 6,
+                          decoration: const BoxDecoration(
+                            shape: BoxShape.circle,
+                            color: Color(0xFFFFD700),
+                          ),
+                        ),
+                      ),
+                    ),
+                  ),
+                );
+              },
+            ),
+          ),
         ),
 
       // Lưới 9 ô (rule of thirds)
@@ -2133,6 +2332,7 @@ class _CameraScreenState extends State<CameraScreen>
                 selected: _stabilizationMode,
                 onChanged: (mode) {
                   setState(() => _stabilizationMode = mode);
+                  _savePreference('pref_stabilization_mode', mode.index);
                   _applyStabilization();
                 },
               ),
@@ -2141,7 +2341,10 @@ class _CameraScreenState extends State<CameraScreen>
               // Bộ lọc màu & Làm đẹp
               FilterSettingsSelector(
                 selected: _selectedFilter,
-                onChanged: (filter) => setState(() => _selectedFilter = filter),
+                onChanged: (filter) {
+                  setState(() => _selectedFilter = filter);
+                  _savePreference('pref_selected_filter', filter.index);
+                },
               ),
               const SizedBox(height: 18),
 
@@ -2187,7 +2390,10 @@ class _CameraScreenState extends State<CameraScreen>
                 // HDR (chỉ ảnh)
                 HdrSelector(
                   selected: _hdrMode,
-                  onChanged: (v) => setState(() => _hdrMode = v),
+                  onChanged: (v) {
+                    setState(() => _hdrMode = v);
+                    _savePreference('pref_hdr_mode', v.index);
+                  },
                 ),
                 const SizedBox(height: 18),
                 // Timer chụp ảnh
@@ -2196,7 +2402,10 @@ class _CameraScreenState extends State<CameraScreen>
                   icon: Icons.timer_outlined,
                   options: _photoTimerOptions,
                   selected: _selectedPhotoTimer,
-                  onChanged: (v) => setState(() => _selectedPhotoTimer = v),
+                  onChanged: (v) {
+                    setState(() => _selectedPhotoTimer = v);
+                    _savePreference('pref_photo_timer', v);
+                  },
                 ),
                 const SizedBox(height: 18),
                 // Chụp liên tiếp
@@ -2207,7 +2416,10 @@ class _CameraScreenState extends State<CameraScreen>
                 // Timestamp
                 TimestampSelector(
                   enabled: _showTimestamp,
-                  onChanged: (v) => setState(() => _showTimestamp = v),
+                  onChanged: (v) {
+                    setState(() => _showTimestamp = v);
+                    _savePreference('pref_show_timestamp', v);
+                  },
                 ),
               ] else ...[
                 // Timer quay video
@@ -2216,7 +2428,12 @@ class _CameraScreenState extends State<CameraScreen>
                   icon: Icons.videocam_outlined,
                   options: _videoDurationOptions,
                   selected: _selectedVideoDuration,
-                  onChanged: (v) { if (!_isRecording) setState(() => _selectedVideoDuration = v); },
+                  onChanged: (v) {
+                    if (!_isRecording) {
+                      setState(() => _selectedVideoDuration = v);
+                      _savePreference('pref_video_duration', v);
+                    }
+                  },
                 ),
               ],
               const SizedBox(height: 18),
@@ -2227,6 +2444,7 @@ class _CameraScreenState extends State<CameraScreen>
                 onChanged: (loc) => setState(() {
                   _storageLocation = loc;
                   _clearSaveDirCache();
+                  _savePreference('pref_storage_location', loc.index);
                 }),
               ),
               const SizedBox(height: 8),
@@ -2365,7 +2583,11 @@ class _CameraScreenState extends State<CameraScreen>
                 child: GestureDetector(
                   onTap: () => setState(() {
                     _burstCount = count;
-                    if (count > 0) _autoIntervalEnabled = false;
+                    if (count > 0) {
+                      _autoIntervalEnabled = false;
+                      _savePreference('pref_auto_interval', false);
+                    }
+                    _savePreference('pref_burst_count', count);
                   }),
                   child: AnimatedContainer(
                     duration: const Duration(milliseconds: 180),
@@ -2452,7 +2674,10 @@ class _CameraScreenState extends State<CameraScreen>
               isSelected: !_autoIntervalEnabled,
               onTap: () {
                 if (_isAutoIntervalCapturing) _stopAutoIntervalCapture();
-                setState(() => _autoIntervalEnabled = false);
+                setState(() {
+                  _autoIntervalEnabled = false;
+                  _savePreference('pref_auto_interval', false);
+                });
               },
             ),
             const SizedBox(width: 10),
@@ -2463,6 +2688,8 @@ class _CameraScreenState extends State<CameraScreen>
               onTap: () => setState(() {
                 _autoIntervalEnabled = true;
                 _burstCount = 0;
+                _savePreference('pref_auto_interval', true);
+                _savePreference('pref_burst_count', 0);
               }),
             ),
           ],
@@ -2574,14 +2801,20 @@ class _CameraScreenState extends State<CameraScreen>
               icon: Icons.grid_on,
               label: 'Hiện lưới 9 ô',
               isSelected: _showGrid,
-              onTap: () => setState(() => _showGrid = true),
+              onTap: () => setState(() {
+                _showGrid = true;
+                _savePreference('pref_show_grid', true);
+              }),
             ),
             const SizedBox(width: 10),
             _GridOption(
               icon: Icons.grid_off,
               label: 'Tắt lưới',
               isSelected: !_showGrid,
-              onTap: () => setState(() => _showGrid = false),
+              onTap: () => setState(() {
+                _showGrid = false;
+                _savePreference('pref_show_grid', false);
+              }),
             ),
           ],
         ),
@@ -2643,14 +2876,20 @@ class _CameraScreenState extends State<CameraScreen>
               icon: Icons.flip,
               label: 'Bật lật ảnh',
               isSelected: _mirrorFrontCamera,
-              onTap: () => setState(() => _mirrorFrontCamera = true),
+              onTap: () => setState(() {
+                _mirrorFrontCamera = true;
+                _savePreference('pref_mirror_front_camera', true);
+              }),
             ),
             const SizedBox(width: 10),
             _GridOption(
               icon: Icons.flip_outlined,
               label: 'Tắt lật ảnh',
               isSelected: !_mirrorFrontCamera,
-              onTap: () => setState(() => _mirrorFrontCamera = false),
+              onTap: () => setState(() {
+                _mirrorFrontCamera = false;
+                _savePreference('pref_mirror_front_camera', false);
+              }),
             ),
           ],
         ),
