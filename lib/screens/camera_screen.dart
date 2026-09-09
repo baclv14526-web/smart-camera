@@ -597,8 +597,11 @@ class _CameraScreenState extends State<CameraScreen>
     final applyTimestamp = _showTimestamp; // Có hiển thị timestamp không
     final filterMatrix = FilterHelper.getMatrix(_selectedFilter); // Matrix filter màu
     final applyFilter = filterMatrix != null; // Có filter nào được chọn không
-    // Lật ảnh: áp dụng khi camera trước VÀ setting lật ảnh được bật
-    final applyMirror = _isFrontCamera && _mirrorFrontCamera;
+    // Lật ảnh chụp: NGƯỢC với setting để khử lật tự động của camera hardware
+    // Camera hardware tự động lật ảnh chụp camera trước theo mặc định
+    // BẬT lật (_mirrorFrontCamera = true) → không lật (khử lật hardware) → ảnh giống camera sau
+    // TẮT lật (_mirrorFrontCamera = false) → lật (giữ nguyên lật hardware) → ảnh như gương
+    final applyMirror = _isFrontCamera && !_mirrorFrontCamera;
 
     // Nếu không có hiệu ứng nào, chỉ copy file
     if (!applyHdr && !applyTimestamp && !applyFilter && !applyMirror) {
@@ -616,6 +619,7 @@ class _CameraScreenState extends State<CameraScreen>
       final canvas = Canvas(recorder); // Canvas để vẽ
 
       // Áp dụng lật ngang cho ảnh selfie camera trước
+      // Nếu preview không lật, thì ảnh chụp cũng không lật (đảo ngược logic camera hardware)
       if (applyMirror) {
         canvas.save();
         canvas.translate(image.width.toDouble(), 0); // Dịch sang phải
@@ -1484,14 +1488,9 @@ class _CameraScreenState extends State<CameraScreen>
       );
     }
 
-    // Áp dụng lật ngang cho preview selfie camera trước
-    if (_isFrontCamera && _mirrorFrontCamera) {
-      preview = Transform(
-        alignment: Alignment.center,
-        transform: Matrix4.identity()..scale(-1.0, 1.0, 1.0), // Lật ngang
-        child: preview,
-      );
-    }
+    // Preview camera trước: LUÔN không lật (giống camera sau)
+    // Không phụ thuộc setting lật ảnh
+    // (Đã xóa logic lật preview)
 
     // Gesture Pinch to Zoom
     return GestureDetector(
