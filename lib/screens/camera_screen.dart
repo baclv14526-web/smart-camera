@@ -112,8 +112,8 @@ class _CameraScreenState extends State<CameraScreen>
   HdrMode _hdrMode = HdrMode.auto; // Chế độ HDR (tắt, bật, auto)
 
   // ── Lật ảnh selfie (camera trước) ─────────────────────────────────────
-  /// Lật ảnh ngang khi dùng camera trước. Mặc định bật khi chụp bằng camera trước.
-  bool _mirrorFrontCamera = true;
+  /// Lật ảnh ngang khi dùng camera trước. Mặc định tắt khi chụp bằng camera trước.
+  bool _mirrorFrontCamera = false;
 
   // ── Âm thanh chụp ảnh / bắt đầu quay ─────────────────────────────────
   final CaptureSoundService _captureSound = CaptureSoundService.instance;
@@ -337,8 +337,6 @@ class _CameraScreenState extends State<CameraScreen>
     setState(() {
       _cameraIndex = nextIndex;
       _isInitializing = true;
-      // Tự động bật lật ảnh khi chuyển sang camera trước
-      if (nextIsFront) _mirrorFrontCamera = true;
     });
     await _initCamera(); // Khởi tạo lại camera mới
   }
