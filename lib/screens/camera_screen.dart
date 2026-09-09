@@ -2,6 +2,7 @@
 import 'dart:async'; // Xử lý async/await và Timer
 import 'dart:io'; // Xử lý file và directory
 import 'dart:ui' as ui; // Xử lý ảnh và canvas
+import 'package:flutter/foundation.dart'; // Isolate compute() để encode ảnh trên background thread
 import 'package:flutter/material.dart'; // UI Flutter
 import 'package:camera/camera.dart'; // Camera Flutter
 import 'package:path_provider/path_provider.dart'; // Lấy đường dẫn thư mục hệ thống
@@ -108,6 +109,14 @@ class _CameraScreenState extends State<CameraScreen>
   bool _sdcardAvailable = false; // Có thẻ SD hay không
   String? _sdcardAppPath; // Đường dẫn app trên SD card
   String? _sdcardRootPath; // Đường dẫn gốc SD card
+  String? _cachedPhotoSaveDir; // Cache đường dẫn lưu ảnh để tăng tốc độ chụp burst
+  String? _cachedVideoSaveDir; // Cache đường dẫn lưu video
+
+  /// Xóa cache đường dẫn lưu file khi đổi cấu hình lưu trữ
+  void _clearSaveDirCache() {
+    _cachedPhotoSaveDir = null;
+    _cachedVideoSaveDir = null;
+  }
 
   // ── Timestamp watermark ───────────────────────────────────────────────────────
   bool _showTimestamp = true; // Hiển thị timestamp trên ảnh hay không
@@ -243,6 +252,7 @@ class _CameraScreenState extends State<CameraScreen>
         setState(() {
           _sdcardAvailable = true;
         });
+        _clearSaveDirCache();
         debugPrint('SD Card detected: root=$_sdcardRootPath, appPath=$_sdcardAppPath');
         return;
       }
@@ -260,6 +270,7 @@ class _CameraScreenState extends State<CameraScreen>
         _storageLocation = StorageLocation.phone;
       }
     });
+    _clearSaveDirCache();
   }
 
   // ── Yêu cầu quyền truy cập ──────────────────────────────────────────────────────────────
@@ -314,7 +325,7 @@ class _CameraScreenState extends State<CameraScreen>
       }
 
       // Đặt cờ GPS sẵn sàng
-      setState(() => _gpsEnabled = true);
+      _gpsEnabled = true;
 
       // Lấy tọa độ hiện tại ngay lập tức (lần đầu)
       try {
@@ -323,14 +334,15 @@ class _CameraScreenState extends State<CameraScreen>
             accuracy: LocationAccuracy.medium, // Cân bằng pin và độ chính xác
           ),
         );
-        if (mounted) setState(() => _lastGpsPosition = pos);
+        _lastGpsPosition = pos;
         debugPrint('GPS: Tọa độ đầu tiên: ${pos.latitude}, ${pos.longitude}');
       } catch (e) {
         debugPrint('GPS: Lỗi lấy tọa độ đầu tiên: $e');
       }
 
-      // Đăng ký stream để cập nhật tọa độ định kỳ mỗi 10 giây
-      // distanceFilter 10m: chỉ cập nhật khi di chuyển ít nhất 10 mét
+      // Đăng ký stream để cập nhật tọa độ định kỳ
+      // Không dùng setState() để tránh trigger rebuild toàn bộ widget tree mỗi khi di chuyển
+      // Tọa độ chỉ được dùng ngầm để gắn vào EXIF metadata khi chụp ảnh.
       _gpsSubscription = Geolocator.getPositionStream(
         locationSettings: const LocationSettings(
           accuracy: LocationAccuracy.medium,
@@ -338,7 +350,7 @@ class _CameraScreenState extends State<CameraScreen>
         ),
       ).listen(
         (Position pos) {
-          if (mounted) setState(() => _lastGpsPosition = pos);
+          _lastGpsPosition = pos;
           debugPrint('GPS: Cập nhật tọa độ: ${pos.latitude}, ${pos.longitude}, alt: ${pos.altitude}m');
         },
         onError: (e) => debugPrint('GPS stream error: $e'),
@@ -631,9 +643,16 @@ class _CameraScreenState extends State<CameraScreen>
 
   // ── Lấy thư mục lưu file ────────────────────────────────────────────────────────────
   /// Tìm và xác thực thư mục có thể ghi file (ưu tiên SD card nếu được chọn)
+  /// Sử dụng biến cache để tránh kiểm tra I/O lặp lại khi chụp burst hoặc auto-interval
   Future<String> _getSaveDir(bool isVideo) async {
+    final cached = isVideo ? _cachedVideoSaveDir : _cachedPhotoSaveDir;
+    if (cached != null && Directory(cached).existsSync()) {
+      return cached;
+    }
+
     const appFolder = 'CameraApp2026'; // Tên thư mục app
     final mediaTypeFolder = isVideo ? 'Movies' : 'Pictures'; // Thư mục theo loại media
+    String resolvedPath = '';
 
     if (Platform.isAndroid) {
       // ── 1. Nếu chọn thẻ SD Card ──
@@ -674,59 +693,76 @@ class _CameraScreenState extends State<CameraScreen>
               testFile.deleteSync(); // Xóa file test
             }
             debugPrint('Valid writable SD card directory: ${dir.path}');
-            return dir.path; // Trả về đường dẫn hợp lệ đầu tiên
+            resolvedPath = dir.path;
+            break;
           } catch (e) {
             debugPrint('SD write candidate $candidate rejected: $e');
           }
         }
-        debugPrint('SD card write candidates rejected, falling back to phone storage');
+        if (resolvedPath.isEmpty) {
+          debugPrint('SD card write candidates rejected, falling back to phone storage');
+        }
       }
 
-      // ── 2. Bộ nhớ trong điện thoại ──
-      final phoneCandidates = <String>[
-        '/storage/emulated/0/DCIM/$appFolder',
-        '/storage/emulated/0/$mediaTypeFolder/$appFolder',
-        '/storage/emulated/0/$appFolder',
-      ];
+      // ── 2. Bộ nhớ trong điện thoại (nếu chưa tìm thấy trên SD) ──
+      if (resolvedPath.isEmpty) {
+        final phoneCandidates = <String>[
+          '/storage/emulated/0/DCIM/$appFolder',
+          '/storage/emulated/0/$mediaTypeFolder/$appFolder',
+          '/storage/emulated/0/$appFolder',
+        ];
 
-      try {
-        final ext = await getExternalStorageDirectory();
-        if (ext != null) {
-          final root = ext.path.split('Android').first;
-          phoneCandidates.insert(0, path.join(root, 'DCIM', appFolder));
-          phoneCandidates.insert(1, path.join(root, mediaTypeFolder, appFolder));
-          phoneCandidates.add(path.join(ext.path, appFolder));
-        }
-      } catch (_) {}
-
-      // Test từng đường dẫn bộ nhớ trong
-      for (final candidate in phoneCandidates) {
         try {
-          final dir = Directory(candidate);
-          if (!dir.existsSync()) {
-            dir.createSync(recursive: true);
+          final ext = await getExternalStorageDirectory();
+          if (ext != null) {
+            final root = ext.path.split('Android').first;
+            phoneCandidates.insert(0, path.join(root, 'DCIM', appFolder));
+            phoneCandidates.insert(1, path.join(root, mediaTypeFolder, appFolder));
+            phoneCandidates.add(path.join(ext.path, appFolder));
           }
-          final testFile = File(path.join(dir.path, '.test_${DateTime.now().millisecondsSinceEpoch}'));
-          testFile.writeAsStringSync('ok');
-          if (testFile.existsSync()) {
-            testFile.deleteSync();
+        } catch (_) {}
+
+        // Test từng đường dẫn bộ nhớ trong
+        for (final candidate in phoneCandidates) {
+          try {
+            final dir = Directory(candidate);
+            if (!dir.existsSync()) {
+              dir.createSync(recursive: true);
+            }
+            final testFile = File(path.join(dir.path, '.test_${DateTime.now().millisecondsSinceEpoch}'));
+            testFile.writeAsStringSync('ok');
+            if (testFile.existsSync()) {
+              testFile.deleteSync();
+            }
+            debugPrint('Valid writable phone directory: ${dir.path}');
+            resolvedPath = dir.path;
+            break;
+          } catch (e) {
+            debugPrint('Phone write candidate $candidate rejected: $e');
           }
-          debugPrint('Valid writable phone directory: ${dir.path}');
-          return dir.path;
-        } catch (e) {
-          debugPrint('Phone write candidate $candidate rejected: $e');
         }
       }
     }
 
     // ── 3. Fallback: Thư mục Documents của App ──
-    final appDocDir = await getApplicationDocumentsDirectory();
-    final fallbackDir = Directory(path.join(appDocDir.path, appFolder));
-    if (!fallbackDir.existsSync()) {
-      fallbackDir.createSync(recursive: true);
+    if (resolvedPath.isEmpty) {
+      final appDocDir = await getApplicationDocumentsDirectory();
+      final fallbackDir = Directory(path.join(appDocDir.path, appFolder));
+      if (!fallbackDir.existsSync()) {
+        fallbackDir.createSync(recursive: true);
+      }
+      resolvedPath = fallbackDir.path;
     }
-    return fallbackDir.path;
+
+    // Lưu vào cache
+    if (isVideo) {
+      _cachedVideoSaveDir = resolvedPath;
+    } else {
+      _cachedPhotoSaveDir = resolvedPath;
+    }
+    return resolvedPath;
   }
+
 
   // ── Xử lý chụp ảnh ─────────────────────────────────────────────────────────────
   /// Xử lý khi người dùng nhấn nút chụp: timer, burst, hoặc chụp đơn
@@ -806,11 +842,13 @@ class _CameraScreenState extends State<CameraScreen>
       return;
     }
 
+    ui.Image? image;
+    ui.Image? outputImage;
     try {
       final bytes = await File(sourcePath).readAsBytes(); // Đọc file ảnh
       final codec = await ui.instantiateImageCodec(bytes); // Decode ảnh
       final frame = await codec.getNextFrame(); // Lấy frame đầu tiên
-      final image = frame.image; // Lấy image object
+      image = frame.image; // Lấy image object
 
       final recorder = ui.PictureRecorder(); // Recorder để vẽ lại
       final canvas = Canvas(recorder); // Canvas để vẽ
@@ -910,26 +948,25 @@ class _CameraScreenState extends State<CameraScreen>
       }
 
       final picture = recorder.endRecording(); // Kết thúc vẽ
-      final outputImage = await picture.toImage(image.width, image.height); // Tạo image từ picture
+      outputImage = await picture.toImage(image.width, image.height); // Tạo image từ picture
 
-      // ── Encode sang JPEG (thay vì PNG) ────────────────────────────────────────
-      // Lý do dùng JPEG:
-      //   1. Dung lượng nhỏ hơn PNG ~10 lần (vd: 3MB thay vì 30MB)
-      //   2. JPEG hỗ trợ EXIF metadata đầy đủ (GPS, ISO, datetime, orientation...)
-      //   3. PNG không có chuẩn EXIF chính thức → native_exif không ghi được
-      // Quality 92: cân bằng tốt giữa chất lượng hình ảnh và dung lượng file
+      // ── Encode sang JPEG trong Isolate riêng (compute) ──────────────────────────
+      // Chuyển toàn bộ tác vụ tính toán nặng (decode RGBA + encode JPEG) sang
+      // Isolate nền để không gây block Main UI thread (ngăn UI đóng băng 1-3s).
       final byteData = await outputImage.toByteData(format: ui.ImageByteFormat.rawRgba);
       if (byteData != null) {
-        // Dùng package 'image' để encode JPEG với quality có thể điều chỉnh
         final rawBytes = byteData.buffer.asUint8List();
-        final imgImage = img.Image.fromBytes(
-          width: image.width,
-          height: image.height,
-          bytes: rawBytes.buffer,
-          order: img.ChannelOrder.rgba, // Canvas Flutter dùng RGBA
-        );
-        // Encode sang JPEG với quality 92 (0-100, 100 = lossless-like)
-        final jpegBytes = img.encodeJpg(imgImage, quality: 92);
+        final width = image.width;
+        final height = image.height;
+
+        // Chạy encode JPEG trên Background Isolate
+        final jpegBytes = await compute(_encodeJpgTask, {
+          'bytes': rawBytes,
+          'width': width,
+          'height': height,
+          'quality': 92,
+        });
+
         await File(destPath).writeAsBytes(jpegBytes); // Ghi file JPEG
       } else {
         await File(sourcePath).copy(destPath); // Fallback: copy JPEG gốc
@@ -937,7 +974,27 @@ class _CameraScreenState extends State<CameraScreen>
     } catch (e) {
       debugPrint('Photo processing error: $e, fallback to copy');
       await File(sourcePath).copy(destPath); // Fallback khi lỗi
+    } finally {
+      // Giải phóng bộ nhớ GPU / RAM của các UI image objects
+      image?.dispose();
+      outputImage?.dispose();
     }
+  }
+
+  // ── Isolate Task: Encode ảnh JPEG trên background thread ────────────────────
+  static Uint8List _encodeJpgTask(Map<String, dynamic> params) {
+    final Uint8List rawBytes = params['bytes'];
+    final int width = params['width'];
+    final int height = params['height'];
+    final int quality = params['quality'];
+
+    final imgImage = img.Image.fromBytes(
+      width: width,
+      height: height,
+      bytes: rawBytes.buffer,
+      order: img.ChannelOrder.rgba, // Canvas Flutter dùng RGBA
+    );
+    return Uint8List.fromList(img.encodeJpg(imgImage, quality: quality));
   }
 
   // ── Chụp ảnh đơn ──────────────────────────────────────────────────────────────
@@ -953,9 +1010,8 @@ class _CameraScreenState extends State<CameraScreen>
 
       await _processCapturedPhoto(xFile.path, filePath); // Xử lý ảnh (filter, HDR, timestamp, mirror)
 
-      // Ghi EXIF metadata vào file JPEG sau khi ảnh đã được lưu
-      // Bao gồm: datetime, thiết bị, GPS coordinates, orientation, flash
-      await _writeExifMetadata(filePath);
+      // Ghi EXIF metadata ngầm (Fire-and-forget) không làm chậm UI/Preview
+      unawaited(_writeExifMetadata(filePath));
 
       setState(() { _isTakingPhoto = false; _lastSavedPath = filePath; _lastSavedIsVideo = false; });
       if (mounted) {
@@ -995,8 +1051,8 @@ class _CameraScreenState extends State<CameraScreen>
 
         await _processCapturedPhoto(xFile.path, filePath); // Xử lý ảnh
 
-        // Ghi EXIF metadata vào từng frame burst (datetime, GPS, thiết bị)
-        await _writeExifMetadata(filePath);
+        // Ghi EXIF metadata ngầm (Fire-and-forget): tiết kiệm ~100ms mỗi frame trong burst mode
+        unawaited(_writeExifMetadata(filePath));
 
         lastPath = filePath;
         saved++;
@@ -1071,9 +1127,8 @@ class _CameraScreenState extends State<CameraScreen>
         );
         await _processCapturedPhoto(xFile.path, filePath);
 
-        // Ghi EXIF metadata sau mỗi frame trong chế độ tự động 20 giây
-        // GPS sẽ được cập nhật tự động từ stream – mỗi ảnh có tọa độ riêng
-        await _writeExifMetadata(filePath);
+        // Ghi EXIF metadata ngầm (Fire-and-forget)
+        unawaited(_writeExifMetadata(filePath));
 
         lastPath = filePath;
         saved++;
@@ -1088,6 +1143,7 @@ class _CameraScreenState extends State<CameraScreen>
         debugPrint('Auto interval frame ${i + 1} error: $e');
       }
     }
+
 
     _autoIntervalWaitTimer?.cancel();
     _autoIntervalWaitTimer = null;
@@ -2168,7 +2224,10 @@ class _CameraScreenState extends State<CameraScreen>
               StorageSelector(
                 selected: _storageLocation,
                 sdcardAvailable: _sdcardAvailable,
-                onChanged: (loc) => setState(() => _storageLocation = loc),
+                onChanged: (loc) => setState(() {
+                  _storageLocation = loc;
+                  _clearSaveDirCache();
+                }),
               ),
               const SizedBox(height: 8),
             ],
@@ -2215,7 +2274,12 @@ class _CameraScreenState extends State<CameraScreen>
                 child: _lastSavedPath != null && !_lastSavedIsVideo
                     ? ClipRRect(
                         borderRadius: BorderRadius.circular(9),
-                        child: Image.file(File(_lastSavedPath!), fit: BoxFit.cover),
+                        child: Image.file(
+                          File(_lastSavedPath!),
+                          fit: BoxFit.cover,
+                          cacheWidth: 108,
+                          cacheHeight: 108,
+                        ),
                       )
                     : const Icon(Icons.photo_library_outlined, color: Colors.white38, size: 28),
               ),
