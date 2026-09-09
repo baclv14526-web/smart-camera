@@ -144,6 +144,26 @@ class _CameraScreenState extends State<CameraScreen>
   // ── Flash ────────────────────────────────────────────────────────────────────
   FlashMode _flashMode = FlashMode.off; // Chế độ flash (tắt, auto, luôn, torch)
 
+  // ── Device info cho EXIF ───────────────────────────────────────────────────
+  String _deviceManufacturer = Platform.isAndroid ? 'Android' : 'Apple';
+  String _deviceModel = 'Camera';
+
+  Future<void> _fetchDeviceInfo() async {
+    if (!Platform.isAndroid) return;
+    try {
+      final info = await _mediaScannerChannel.invokeMapMethod<String, dynamic>('getDeviceInfo');
+      if (info != null) {
+        final manu = (info['manufacturer'] ?? info['brand'] ?? 'Android').toString();
+        final mdl = (info['model'] ?? info['device'] ?? 'Device').toString();
+        _deviceManufacturer = manu[0].toUpperCase() + manu.substring(1);
+        _deviceModel = mdl;
+        debugPrint('EXIF Device Info fetched: Make=$_deviceManufacturer, Model=$_deviceModel');
+      }
+    } catch (e) {
+      debugPrint('getDeviceInfo error: $e');
+    }
+  }
+
   // ── EXIF / GPS ───────────────────────────────────────────────────────────────
   // Tọa độ GPS gần nhất để ghi vào EXIF khi chụp ảnh (null nếu GPS chưa sẵn sàng)
   Position? _lastGpsPosition;
@@ -180,6 +200,7 @@ class _CameraScreenState extends State<CameraScreen>
     _captureSound.init().then((_) {
       if (mounted) setState(() {});
     });
+    _fetchDeviceInfo(); // Lấy thông tin thiết bị thực tế để ghi Make & Model vào EXIF
     _loadSavedPreferences(); // Khôi phục các cài đặt đã lưu của người dùng
     _requestPermissions(); // Yêu cầu quyền truy cập camera, microphone, storage
     _detectSdCard(); // Phát hiện thẻ SD card
@@ -505,13 +526,11 @@ class _CameraScreenState extends State<CameraScreen>
       await exif.writeAttribute('DateTime', exifDateStr); // Thời gian chỉnh sửa file
 
       // ── 2. THÔNG TIN THIẾT BỊ (Make, Model, Software) ──────────────────────────
-      // Lấy thông tin brand và model từ platform
-      final deviceBrand = Platform.isAndroid ? 'Android Device' : 'iOS Device';
-      final cameraFacing = _isFrontCamera ? 'Front' : 'Rear';
-
-      await exif.writeAttribute('Make', deviceBrand); // Nhà sản xuất thiết bị
-      await exif.writeAttribute('Model', 'Camera $cameraFacing'); // Model camera đang dùng
-      await exif.writeAttribute('Software', 'CameraApp2026 v1.0.0'); // Tên phần mềm chụp
+      // Ghi thông tin hãng sản xuất và model máy thực tế của điện thoại
+      final cameraFacing = _isFrontCamera ? 'Front Camera' : 'Rear Camera';
+      await exif.writeAttribute('Make', _deviceManufacturer); // Hãng sản xuất (Samsung, Xiaomi, Google, Sony, Apple...)
+      await exif.writeAttribute('Model', '$_deviceModel ($cameraFacing)'); // Model thiết bị (SM-S918B, Pixel 8,...)
+      await exif.writeAttribute('Software', 'CameraApp2026 v1.0.0'); // Tên phần mềm chụp ảnh
 
       // ── 3. ORIENTATION (Chiều ảnh) ───────────────────────────────────────────────
       // Orientation = 1 (Normal): App đã xử lý rotation/mirror, ảnh đã đúng chiều.

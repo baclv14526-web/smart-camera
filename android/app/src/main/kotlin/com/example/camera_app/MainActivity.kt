@@ -25,6 +25,14 @@ class MainActivity: FlutterActivity() {
                 } else {
                     result.error("INVALID_PATH", "File path is null", null)
                 }
+            } else if (call.method == "getDeviceInfo") {
+                val info = mapOf(
+                    "manufacturer" to android.os.Build.MANUFACTURER,
+                    "model" to android.os.Build.MODEL,
+                    "device" to android.os.Build.DEVICE,
+                    "brand" to android.os.Build.BRAND
+                )
+                result.success(info)
             } else {
                 result.notImplemented()
             }
