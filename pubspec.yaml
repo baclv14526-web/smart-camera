@@ -4,7 +4,7 @@ publish_to: 'none'
 version: 1.0.0+1
 
 environment:
-  sdk: '>=3.0.0 <4.0.0'
+  sdk: '>=3.3.0 <4.0.0'
 
 dependencies:
   flutter:
@@ -18,7 +18,7 @@ dependencies:
   audioplayers: ^6.1.0
   file_picker: ^8.1.4
   shared_preferences: ^2.3.2
-  native_exif: ^0.4.1       # Ghi EXIF metadata vào file JPEG (ISO, GPS, datetime, orientation...)
+  native_exif: ^0.8.0       # Ghi EXIF metadata vào file JPEG (ISO, GPS, datetime, orientation...)
   geolocator: ^13.0.2       # Lấy tọa độ GPS (latitude, longitude, altitude) để ghi vào EXIF
   image: ^4.2.0             # Encode JPEG (thay thế PNG) để file nhỏ hơn và hỗ trợ EXIF đầy đủ
 

@@ -15,6 +15,21 @@ subprojects {
     project.evaluationDependsOn(":app")
 }
 
+// Fix lỗi AGP 8.0+: "Namespace not specified" cho các plugin cũ chưa khai báo namespace.
+// Các package như native_exif dùng package attribute trong AndroidManifest.xml thay vì
+// namespace trong build.gradle — AGP 8.0+ không còn chấp nhận cách cũ này.
+// Workaround: tự động lấy project.group (thường = package name) làm namespace.
+subprojects {
+    afterEvaluate { project ->
+        if (project.plugins.hasPlugin("com.android.library")) {
+            if (!project.android.hasProperty("namespace") || project.android.namespace == null) {
+                // Dùng group của project (= package name từ AndroidManifest) làm namespace
+                project.android.namespace = project.group
+            }
+        }
+    }
+}
+
 tasks.register("clean", Delete) {
     delete rootProject.layout.buildDirectory
 }
