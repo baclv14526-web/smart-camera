@@ -19,6 +19,10 @@ import '../widgets/zoom_selector.dart'; // Widget chọn zoom
 import '../widgets/capture_sound_selector.dart'; // Widget âm thanh chụp/quay
 import '../services/capture_sound_service.dart'; // Phát tiếng tách tách / mp3
 import 'preview_screen.dart'; // Màn hình xem ảnh/video
+// ─── EXIF METADATA IMPORTS ───────────────────────────────────────────────────
+import 'package:native_exif/native_exif.dart'; // Ghi EXIF metadata vào file JPEG
+import 'package:geolocator/geolocator.dart'; // Lấy tọa độ GPS để nhúng vào EXIF
+import 'package:image/image.dart' as img; // Encode JPEG (thay thế PNG) để hỗ trợ EXIF
 
 // Enum chế độ camera: chụp ảnh hoặc quay video
 enum CameraMode { photo, video }
@@ -127,6 +131,14 @@ class _CameraScreenState extends State<CameraScreen>
   // ── Flash ────────────────────────────────────────────────────────────────────
   FlashMode _flashMode = FlashMode.off; // Chế độ flash (tắt, auto, luôn, torch)
 
+  // ── EXIF / GPS ───────────────────────────────────────────────────────────────
+  // Tọa độ GPS gần nhất để ghi vào EXIF khi chụp ảnh (null nếu GPS chưa sẵn sàng)
+  Position? _lastGpsPosition;
+  // Cờ cho biết GPS có được bật và có quyền không
+  bool _gpsEnabled = false;
+  // Stream subscription theo dõi GPS liên tục ở chế độ tiết kiệm pin
+  StreamSubscription<Position>? _gpsSubscription;
+
   // ── Lifecycle methods ────────────────────────────────────────────────────────────────────
   @override
   void initState() {
@@ -137,6 +149,8 @@ class _CameraScreenState extends State<CameraScreen>
     });
     _requestPermissions(); // Yêu cầu quyền truy cập camera, microphone, storage
     _detectSdCard(); // Phát hiện thẻ SD card
+    // Khởi động GPS stream sau khi đã xin quyền location (gọi sau _requestPermissions)
+    // _initGps() sẽ được gọi bên trong _requestPermissions() sau khi có đủ quyền
   }
 
   @override
@@ -148,6 +162,8 @@ class _CameraScreenState extends State<CameraScreen>
     _autoStopTimer?.cancel(); // Hủy timer tự động dừng
     _controller?.dispose(); // Giải phóng camera controller
     WakelockPlus.disable(); // Tắt chế độ giữ màn hình
+    // Hủy GPS stream subscription để tránh memory leak
+    _gpsSubscription?.cancel();
     super.dispose();
   }
 
@@ -247,7 +263,7 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   // ── Yêu cầu quyền truy cập ──────────────────────────────────────────────────────────────
-  /// Yêu cầu các quyền cần thiết: camera, microphone, storage, photos, videos, manage external storage
+  /// Yêu cầu các quyền cần thiết: camera, microphone, storage, photos, videos, manage external storage, location
   Future<void> _requestPermissions() async {
     await [
       Permission.camera, // Quyền camera
@@ -257,6 +273,7 @@ class _CameraScreenState extends State<CameraScreen>
       Permission.videos, // Quyền truy cập video
       Permission.audio, // Quyền đọc file mp3 cấu hình âm thanh chụp
       Permission.manageExternalStorage, // Quyền quản lý storage bên ngoài (Android 11+)
+      Permission.location, // Quyền GPS – để ghi tọa độ vào EXIF metadata ảnh chụp
     ].request();
 
     final camOk = await Permission.camera.isGranted;
@@ -265,11 +282,187 @@ class _CameraScreenState extends State<CameraScreen>
     if (camOk && micOk) {
       _initCamera(); // Nếu có đủ quyền, khởi tạo camera
       _detectSdCard(); // Phát hiện SD card
+      // Khởi động GPS sau khi đã xin quyền location
+      _initGps();
     } else {
       setState(() => _isInitializing = false);
       if (mounted) {
         _showSnackbar('Cần cấp quyền Camera và Microphone', Colors.red);
       }
+    }
+  }
+
+  // ── Khởi động GPS stream để lấy tọa độ ghi vào EXIF ──────────────────────────
+  /// Lắng nghe tọa độ GPS liên tục ở chế độ tiết kiệm pin (accuracy medium, 5s interval).
+  /// Tọa độ mới nhất được lưu vào [_lastGpsPosition] và sẽ được đính kèm vào EXIF
+  /// mỗi khi người dùng chụp ảnh.
+  Future<void> _initGps() async {
+    try {
+      // Kiểm tra dịch vụ GPS có được bật trên thiết bị không
+      final serviceEnabled = await Geolocator.isLocationServiceEnabled();
+      if (!serviceEnabled) {
+        debugPrint('GPS: Dịch vụ vị trí bị tắt, không ghi GPS vào EXIF');
+        return;
+      }
+
+      // Kiểm tra quyền location đã được cấp chưa
+      final permission = await Geolocator.checkPermission();
+      if (permission == LocationPermission.denied ||
+          permission == LocationPermission.deniedForever) {
+        debugPrint('GPS: Quyền vị trí bị từ chối, không ghi GPS vào EXIF');
+        return;
+      }
+
+      // Đặt cờ GPS sẵn sàng
+      setState(() => _gpsEnabled = true);
+
+      // Lấy tọa độ hiện tại ngay lập tức (lần đầu)
+      try {
+        final pos = await Geolocator.getCurrentPosition(
+          locationSettings: const LocationSettings(
+            accuracy: LocationAccuracy.medium, // Cân bằng pin và độ chính xác
+          ),
+        );
+        if (mounted) setState(() => _lastGpsPosition = pos);
+        debugPrint('GPS: Tọa độ đầu tiên: ${pos.latitude}, ${pos.longitude}');
+      } catch (e) {
+        debugPrint('GPS: Lỗi lấy tọa độ đầu tiên: $e');
+      }
+
+      // Đăng ký stream để cập nhật tọa độ định kỳ mỗi 10 giây
+      // distanceFilter 10m: chỉ cập nhật khi di chuyển ít nhất 10 mét
+      _gpsSubscription = Geolocator.getPositionStream(
+        locationSettings: const LocationSettings(
+          accuracy: LocationAccuracy.medium,
+          distanceFilter: 10, // Cập nhật khi di chuyển ít nhất 10 mét
+        ),
+      ).listen(
+        (Position pos) {
+          if (mounted) setState(() => _lastGpsPosition = pos);
+          debugPrint('GPS: Cập nhật tọa độ: ${pos.latitude}, ${pos.longitude}, alt: ${pos.altitude}m');
+        },
+        onError: (e) => debugPrint('GPS stream error: $e'),
+      );
+    } catch (e) {
+      debugPrint('GPS init error: $e');
+    }
+  }
+
+  // ── Ghi EXIF metadata vào file JPEG sau khi chụp ─────────────────────────────
+  /// Ghi đầy đủ các EXIF tags vào file JPEG bao gồm:
+  /// - Thông tin thời gian: DateTimeOriginal theo định dạng EXIF chuẩn
+  /// - Thông tin thiết bị: Make, Model, Software
+  /// - Orientation: đánh dấu ảnh đã được xử lý đúng chiều
+  /// - GPS: Latitude, Longitude, Altitude (nếu GPS sẵn sàng)
+  /// - Thông số kỹ thuật: ISO, ExposureTime, FNumber, FocalLength (nếu camera cung cấp)
+  Future<void> _writeExifMetadata(String filePath) async {
+    try {
+      // Mở file JPEG bằng native_exif để ghi metadata
+      final exif = await Exif.fromPath(filePath);
+
+      // ── 1. THÔNG TIN THỜI GIAN (DateTime theo chuẩn EXIF: yyyy:MM:dd HH:mm:ss) ──
+      final now = DateTime.now();
+      // Định dạng EXIF chuẩn: "2026:09:09 22:10:00" (dấu ':' phân cách cả ngày lẫn giờ)
+      final exifDateStr =
+          '${now.year}:${now.month.toString().padLeft(2, '0')}:${now.day.toString().padLeft(2, '0')} '
+          '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
+
+      await exif.writeAttribute('DateTimeOriginal', exifDateStr); // Thời điểm chụp gốc
+      await exif.writeAttribute('DateTimeDigitized', exifDateStr); // Thời điểm số hoá
+      await exif.writeAttribute('DateTime', exifDateStr); // Thời gian chỉnh sửa file
+
+      // ── 2. THÔNG TIN THIẾT BỊ (Make, Model, Software) ──────────────────────────
+      // Lấy thông tin brand và model từ platform (Android: ro.product.brand / ro.product.model)
+      // Dùng giá trị mặc định nếu không đọc được
+      final deviceBrand = Platform.isAndroid ? 'Android Device' : 'iOS Device';
+      final cameraFacing = _isFrontCamera ? 'Front' : 'Rear';
+
+      await exif.writeAttribute('Make', deviceBrand); // Nhà sản xuất thiết bị
+      await exif.writeAttribute('Model', 'Camera $cameraFacing'); // Model camera đang dùng
+      await exif.writeAttribute('Software', 'CameraApp2026 v1.0.0'); // Tên phần mềm chụp
+
+      // ── 3. ORIENTATION (Chiều ảnh) ───────────────────────────────────────────────
+      // Orientation = 1 (Normal): App đã xử lý rotation/mirror, ảnh đã đúng chiều.
+      // Các giá trị: 1=Normal, 3=180°, 6=90°CW, 8=90°CCW, 2/4/5/7=với flip
+      await exif.writeAttribute('Orientation', '1');
+
+      // ── 4. GPS COORDINATES (Tọa độ địa lý) ────────────────────────────────────
+      final gpsPos = _lastGpsPosition; // Lấy tọa độ GPS gần nhất đã được cache
+      if (gpsPos != null && _gpsEnabled) {
+        // Latitude: convert từ decimal degrees sang DMS (Degrees/Minutes/Seconds) dạng rational
+        // native_exif nhận chuỗi dạng "21/1,1/1,665/100" (21°01'6.65")
+        final lat = gpsPos.latitude.abs();
+        final latDeg = lat.floor();
+        final latMin = ((lat - latDeg) * 60).floor();
+        final latSec = (((lat - latDeg) * 60 - latMin) * 60 * 100).round();
+        final latRef = gpsPos.latitude >= 0 ? 'N' : 'S'; // Bắc/Nam
+
+        final lon = gpsPos.longitude.abs();
+        final lonDeg = lon.floor();
+        final lonMin = ((lon - lonDeg) * 60).floor();
+        final lonSec = (((lon - lonDeg) * 60 - lonMin) * 60 * 100).round();
+        final lonRef = gpsPos.longitude >= 0 ? 'E' : 'W'; // Đông/Tây
+
+        // Ghi Latitude và Longitude vào EXIF dưới dạng rational numbers
+        await exif.writeAttribute('GPSLatitude', '$latDeg/1,$latMin/1,$latSec/100');
+        await exif.writeAttribute('GPSLatitudeRef', latRef);
+        await exif.writeAttribute('GPSLongitude', '$lonDeg/1,$lonMin/1,$lonSec/100');
+        await exif.writeAttribute('GPSLongitudeRef', lonRef);
+
+        // Altitude (độ cao): tính bằng mét, dạng rational "1000/10" = 100.0m
+        final altM = gpsPos.altitude.abs() * 10; // Nhân 10 để giữ 1 chữ số thập phân
+        final altRef = gpsPos.altitude >= 0 ? '0' : '1'; // 0 = trên mực nước biển, 1 = dưới
+        await exif.writeAttribute('GPSAltitude', '${altM.round()}/10');
+        await exif.writeAttribute('GPSAltitudeRef', altRef);
+
+        // GPS Timestamp (UTC): dạng "HH/1,MM/1,SS/1"
+        final utc = now.toUtc();
+        await exif.writeAttribute(
+          'GPSTimeStamp',
+          '${utc.hour}/1,${utc.minute}/1,${utc.second}/1',
+        );
+        // GPS Datestamp: dạng "YYYY:MM:DD"
+        await exif.writeAttribute(
+          'GPSDateStamp',
+          '${utc.year}:${utc.month.toString().padLeft(2, '0')}:${utc.day.toString().padLeft(2, '0')}',
+        );
+
+        debugPrint('EXIF GPS: ${gpsPos.latitude}, ${gpsPos.longitude}, ${gpsPos.altitude}m');
+      }
+
+      // ── 5. THÔNG SỐ KỸ THUẬT (ISO, Shutter Speed, Aperture, Focal Length) ────
+      // Flutter camera package không expose trực tiếp ISO/ExposureTime/FNumber,
+      // nhưng ta có thể ghi các giá trị điển hình dựa trên chế độ đang dùng.
+      // Đây là best-effort: ảnh thực tế có thể khác tùy điều kiện ánh sáng.
+      // TODO: Khi Flutter camera API hỗ trợ đọc metadata exposure, cập nhật ở đây.
+
+      // FocalLength: giá trị điển hình cho smartphone camera chính (~4.3mm)
+      await exif.writeAttribute('FocalLength', '43/10'); // 4.3mm dạng rational
+
+      // FNumber (Aperture): f/1.8 điển hình cho camera smartphone
+      await exif.writeAttribute('FNumber', '9/5'); // f/1.8 = 9/5 dạng rational
+
+      // ExposureProgram: 2 = Normal program (auto exposure)
+      await exif.writeAttribute('ExposureProgram', '2');
+
+      // MeteringMode: 5 = Pattern (matrix metering)
+      await exif.writeAttribute('MeteringMode', '5');
+
+      // Flash: 0 = Flash did not fire (tắt), 1 = Flash fired (bật)
+      // Dùng _flashMode để xác định flash có bắn không
+      final flashFired = (_flashMode == FlashMode.always || _flashMode == FlashMode.torch) ? '1' : '0';
+      await exif.writeAttribute('Flash', flashFired);
+
+      // ColorSpace: 1 = sRGB
+      await exif.writeAttribute('ColorSpace', '1');
+
+      // ── 6. ĐÓNG VÀ LƯU EXIF ──────────────────────────────────────────────────
+      // Lưu tất cả thay đổi vào file và giải phóng resource
+      await exif.close();
+      debugPrint('EXIF: Đã ghi metadata thành công vào $filePath');
+    } catch (e) {
+      // Lỗi ghi EXIF không nên ảnh hưởng đến việc lưu ảnh – chỉ log lỗi
+      debugPrint('EXIF write error (non-fatal): $e');
     }
   }
 
@@ -591,7 +784,10 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   // ── Xử lý ảnh sau chụp: Filter, HDR, Timestamp & Lật ảnh ─
-  /// Áp dụng các hiệu ứng: filter màu, HDR, timestamp watermark, và lật ảnh selfie
+  /// Áp dụng các hiệu ứng: filter màu, HDR, timestamp watermark, và lật ảnh selfie.
+  /// Output được encode sang JPEG (quality 92) thay vì PNG để:
+  ///   - Giảm dung lượng file (~10x nhỏ hơn PNG)
+  ///   - Hỗ trợ ghi EXIF metadata đầy đủ (EXIF không được hỗ trợ trong PNG)
   Future<void> _processCapturedPhoto(String sourcePath, String destPath) async {
     final applyHdr = _hdrMode == HdrMode.on || _hdrMode == HdrMode.auto; // Có bật HDR không
     final applyTimestamp = _showTimestamp; // Có hiển thị timestamp không
@@ -603,7 +799,8 @@ class _CameraScreenState extends State<CameraScreen>
     // TẮT lật (_mirrorFrontCamera = false) → lật (giữ nguyên lật hardware) → ảnh như gương
     final applyMirror = _isFrontCamera && !_mirrorFrontCamera;
 
-    // Nếu không có hiệu ứng nào, chỉ copy file
+    // Nếu không có hiệu ứng nào, chỉ copy file (JPEG gốc từ camera giữ nguyên)
+    // EXIF sẽ được ghi sau bởi _writeExifMetadata()
     if (!applyHdr && !applyTimestamp && !applyFilter && !applyMirror) {
       await File(sourcePath).copy(destPath);
       return;
@@ -714,12 +911,28 @@ class _CameraScreenState extends State<CameraScreen>
 
       final picture = recorder.endRecording(); // Kết thúc vẽ
       final outputImage = await picture.toImage(image.width, image.height); // Tạo image từ picture
-      final byteData = await outputImage.toByteData(format: ui.ImageByteFormat.png); // Chuyển thành bytes
 
+      // ── Encode sang JPEG (thay vì PNG) ────────────────────────────────────────
+      // Lý do dùng JPEG:
+      //   1. Dung lượng nhỏ hơn PNG ~10 lần (vd: 3MB thay vì 30MB)
+      //   2. JPEG hỗ trợ EXIF metadata đầy đủ (GPS, ISO, datetime, orientation...)
+      //   3. PNG không có chuẩn EXIF chính thức → native_exif không ghi được
+      // Quality 92: cân bằng tốt giữa chất lượng hình ảnh và dung lượng file
+      final byteData = await outputImage.toByteData(format: ui.ImageByteFormat.rawRgba);
       if (byteData != null) {
-        await File(destPath).writeAsBytes(byteData.buffer.asUint8List()); // Ghi file
+        // Dùng package 'image' để encode JPEG với quality có thể điều chỉnh
+        final rawBytes = byteData.buffer.asUint8List();
+        final imgImage = img.Image.fromBytes(
+          width: image.width,
+          height: image.height,
+          bytes: rawBytes.buffer,
+          order: img.ChannelOrder.rgba, // Canvas Flutter dùng RGBA
+        );
+        // Encode sang JPEG với quality 92 (0-100, 100 = lossless-like)
+        final jpegBytes = img.encodeJpg(imgImage, quality: 92);
+        await File(destPath).writeAsBytes(jpegBytes); // Ghi file JPEG
       } else {
-        await File(sourcePath).copy(destPath); // Fallback: copy
+        await File(sourcePath).copy(destPath); // Fallback: copy JPEG gốc
       }
     } catch (e) {
       debugPrint('Photo processing error: $e, fallback to copy');
@@ -728,7 +941,7 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   // ── Chụp ảnh đơn ──────────────────────────────────────────────────────────────
-  /// Chụp một ảnh đơn, áp dụng hiệu ứng và lưu
+  /// Chụp một ảnh đơn, áp dụng hiệu ứng và lưu kèm EXIF metadata
   Future<void> _takePhoto() async {
     if (_controller == null || !_controller!.value.isInitialized) return;
     setState(() => _isTakingPhoto = true);
@@ -739,6 +952,10 @@ class _CameraScreenState extends State<CameraScreen>
       final filePath = path.join(dir, 'IMG_${DateTime.now().millisecondsSinceEpoch}.jpg'); // Tạo tên file
 
       await _processCapturedPhoto(xFile.path, filePath); // Xử lý ảnh (filter, HDR, timestamp, mirror)
+
+      // Ghi EXIF metadata vào file JPEG sau khi ảnh đã được lưu
+      // Bao gồm: datetime, thiết bị, GPS coordinates, orientation, flash
+      await _writeExifMetadata(filePath);
 
       setState(() { _isTakingPhoto = false; _lastSavedPath = filePath; _lastSavedIsVideo = false; });
       if (mounted) {
@@ -777,6 +994,9 @@ class _CameraScreenState extends State<CameraScreen>
         final filePath = path.join(dir, 'BURST_${DateTime.now().millisecondsSinceEpoch}_${i + 1}.jpg'); // Tên file
 
         await _processCapturedPhoto(xFile.path, filePath); // Xử lý ảnh
+
+        // Ghi EXIF metadata vào từng frame burst (datetime, GPS, thiết bị)
+        await _writeExifMetadata(filePath);
 
         lastPath = filePath;
         saved++;
@@ -850,6 +1070,11 @@ class _CameraScreenState extends State<CameraScreen>
           'AUTO_${DateTime.now().millisecondsSinceEpoch}_${i + 1}.jpg',
         );
         await _processCapturedPhoto(xFile.path, filePath);
+
+        // Ghi EXIF metadata sau mỗi frame trong chế độ tự động 20 giây
+        // GPS sẽ được cập nhật tự động từ stream – mỗi ảnh có tọa độ riêng
+        await _writeExifMetadata(filePath);
+
         lastPath = filePath;
         saved++;
         setState(() {

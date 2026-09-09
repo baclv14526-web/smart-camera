@@ -16,6 +16,10 @@
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
 
+    <!-- GPS: Lấy tọa độ để ghi vào EXIF metadata của ảnh chụp -->
+    <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />
+    <uses-permission android:name="android.permission.ACCESS_COARSE_LOCATION" />
+
     <!-- Giữ màn hình sáng khi quay -->
     <uses-permission android:name="android.permission.WAKE_LOCK" />
 
