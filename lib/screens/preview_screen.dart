@@ -117,15 +117,10 @@ class _PreviewScreenState extends State<PreviewScreen> {
             onTap: _togglePlay,
           ),
         _BottomBtn(
-          icon: Icons.folder_open,
-          label: 'Đã lưu',
+          icon: Icons.info_outline,
+          label: 'Chi tiết file',
           color: const Color(0xFFFFD700),
-          onTap: () => ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(
-              content: Text('File đã lưu vào bộ nhớ thiết bị'),
-              backgroundColor: Colors.green,
-            ),
-          ),
+          onTap: () => _showFileInfoModal(context),
         ),
         _BottomBtn(
           icon: Icons.close,
@@ -133,6 +128,82 @@ class _PreviewScreenState extends State<PreviewScreen> {
           onTap: () => Navigator.pop(context),
         ),
       ]),
+    );
+  }
+
+  void _showFileInfoModal(BuildContext context) {
+    final file = File(widget.filePath);
+    final exists = file.existsSync();
+    final sizeStr = exists
+        ? '${(file.lengthSync() / (1024 * 1024)).toStringAsFixed(2)} MB'
+        : 'Không xác định';
+    final modifiedStr = exists
+        ? file.lastModifiedSync().toString().split('.').first
+        : 'N/A';
+
+    final isSdCard = widget.filePath.contains('/storage/') &&
+        !widget.filePath.contains('/storage/emulated/0');
+
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: const Color(0xFF1E1E1E),
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(16)),
+      ),
+      builder: (ctx) => Padding(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Row(
+              children: [
+                Icon(
+                  isSdCard ? Icons.sd_card : Icons.phone_android,
+                  color: const Color(0xFFFFD700),
+                  size: 22,
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  isSdCard ? 'Lưu tại Thẻ nhớ microSD' : 'Lưu tại Bộ nhớ máy',
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                  ),
+                ),
+              ],
+            ),
+            const Divider(color: Colors.white24, height: 24),
+            _infoRow('Loại tệp:', widget.isVideo ? 'Video (MP4)' : 'Ảnh chụp (JPEG)'),
+            const SizedBox(height: 10),
+            _infoRow('Kích thước:', sizeStr),
+            const SizedBox(height: 10),
+            _infoRow('Thời gian:', modifiedStr),
+            const SizedBox(height: 10),
+            _infoRow('Đường dẫn đầy đủ:', widget.filePath, isPath: true),
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _infoRow(String title, String val, {bool isPath = false}) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title, style: const TextStyle(color: Colors.white54, fontSize: 12)),
+        const SizedBox(height: 2),
+        SelectableText(
+          val,
+          style: TextStyle(
+            color: isPath ? const Color(0xFFFFD700) : Colors.white,
+            fontSize: isPath ? 12 : 14,
+            fontWeight: isPath ? FontWeight.normal : FontWeight.w500,
+          ),
+        ),
+      ],
     );
   }
 }

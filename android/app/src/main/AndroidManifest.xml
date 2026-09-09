@@ -11,10 +11,11 @@
     <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE"
         android:maxSdkVersion="29" />
 
-    <!-- Storage Android 13+ -->
+    <!-- Storage Android 13+ & Manage External Storage (Android 11+) -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_MEDIA_AUDIO" />
+    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE" />
 
     <!-- GPS: Lấy tọa độ để ghi vào EXIF metadata của ảnh chụp -->
     <uses-permission android:name="android.permission.ACCESS_FINE_LOCATION" />

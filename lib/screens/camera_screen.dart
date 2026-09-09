@@ -823,24 +823,21 @@ class _CameraScreenState extends State<CameraScreen>
       if (_storageLocation == StorageLocation.sdcard) {
         final sdCandidates = <String>[];
 
-        // Thư mục công khai trên SD Card (DCIM / Pictures / Movies / CameraApp2026)
+        // Thư mục công khai chuẩn trên SD Card (DCIM / Pictures / Movies / CameraApp2026)
         if (_sdcardRootPath != null) {
           sdCandidates.add(path.join(_sdcardRootPath!, 'DCIM', appFolder));
           sdCandidates.add(path.join(_sdcardRootPath!, mediaTypeFolder, appFolder));
+          sdCandidates.add(path.join(_sdcardRootPath!, 'DCIM', 'Camera'));
           sdCandidates.add(path.join(_sdcardRootPath!, appFolder));
+          sdCandidates.add(path.join(_sdcardRootPath!, 'Android', 'media', 'com.example.camera_app', appFolder));
+          sdCandidates.add(path.join(_sdcardRootPath!, 'Android', 'data', 'com.example.camera_app', 'files', appFolder));
         }
 
-        // Thư mục app-specific trên SD Card (đảm bảo quyền ghi trên Android 10+)
+        // Thư mục app-specific trên SD Card (đảm bảo ghi thành công ngay cả khi quyền hạn chế)
         if (_sdcardAppPath != null) {
           sdCandidates.add(path.join(_sdcardAppPath!, appFolder));
           sdCandidates.add(path.join(_sdcardAppPath!, mediaTypeFolder, appFolder));
           sdCandidates.add(_sdcardAppPath!);
-        }
-
-        // Đường dẫn package-specific trên SD
-        if (_sdcardRootPath != null) {
-          sdCandidates.add(path.join(_sdcardRootPath!, 'Android', 'data', 'com.example.camera_app', 'files', appFolder));
-          sdCandidates.add(path.join(_sdcardRootPath!, 'Android', 'media', 'com.example.camera_app', appFolder));
         }
 
         // Test từng đường dẫn xem có thể ghi được không
@@ -1185,7 +1182,8 @@ class _CameraScreenState extends State<CameraScreen>
 
       setState(() { _isTakingPhoto = false; _lastSavedPath = filePath; _lastSavedIsVideo = false; });
       if (mounted) {
-        final locText = _storageLocation == StorageLocation.sdcard ? 'thẻ nhớ SD' : 'điện thoại';
+        final isActualSd = filePath.contains('/storage/') && !filePath.contains('/storage/emulated/0');
+        final locText = isActualSd ? 'thẻ nhớ microSD' : 'bộ nhớ điện thoại';
         final hdrText = _hdrMode != HdrMode.off ? ' (HDR)' : '';
         _showSnackbar('✅ Đã lưu ảnh$hdrText vào $locText', Colors.green);
         _openPreview(filePath, false); // Mở màn hình xem ảnh
