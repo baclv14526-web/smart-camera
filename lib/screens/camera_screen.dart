@@ -14,6 +14,7 @@ import '../widgets/timer_selector.dart'; // Widget chọn timer
 import '../widgets/quality_selector.dart'; // Widget chọn chất lượng
 import '../widgets/storage_selector.dart'; // Widget chọn bộ nhớ
 import '../widgets/timestamp_selector.dart'; // Widget chọn timestamp
+import '../widgets/gps_watermark_selector.dart'; // Widget chọn GPS watermark
 import '../widgets/hdr_selector.dart'; // Widget chọn HDR
 import '../widgets/filter_selector.dart'; // Widget chọn filter
 import '../widgets/stabilization_selector.dart'; // Widget chọn chống rung
@@ -120,8 +121,9 @@ class _CameraScreenState extends State<CameraScreen>
     _cachedVideoSaveDir = null;
   }
 
-  // ── Timestamp watermark ───────────────────────────────────────────────────────
+  // ── Timestamp & GPS watermark ────────────────────────────────────────────────
   bool _showTimestamp = true; // Hiển thị timestamp trên ảnh hay không
+  bool _showGpsWatermark = true; // Hiển thị tọa độ GPS trên ảnh hay không (phía trên timestamp, không nền)
 
   // ── Chế độ HDR ─────────────────────────────────────────────────────────────────
   HdrMode _hdrMode = HdrMode.auto; // Chế độ HDR (tắt, bật, auto)
@@ -238,6 +240,8 @@ class _CameraScreenState extends State<CameraScreen>
         _showGrid = prefs.getBool('pref_show_grid') ?? _showGrid;
         // Timestamp
         _showTimestamp = prefs.getBool('pref_show_timestamp') ?? _showTimestamp;
+        // GPS Watermark
+        _showGpsWatermark = prefs.getBool('pref_show_gps_watermark') ?? _showGpsWatermark;
         // Mirror Front Camera
         _mirrorFrontCamera = prefs.getBool('pref_mirror_front_camera') ?? _mirrorFrontCamera;
         // Photo Timer
@@ -690,140 +694,7 @@ class _CameraScreenState extends State<CameraScreen>
       await _controller!.setZoomLevel(targetZoom); // Áp dụng zoom
     } catch (e) {
       debugPrint('Set zoom error: $e');
-    }
-  }
-
-  // ── Chuyển camera (trước/sau) ─────────────────────────────────────────────────────────────
-  /// Chuyển giữa camera sau và camera trước
-  Future<void> _switchCamera() async {
-    if (_isAutoIntervalCapturing) _stopAutoIntervalCapture();
-    if (widget.cameras.length < 2) return; // Cần ít nhất 2 camera
-    final nextIndex = _cameraIndex == 0 ? 1 : 0; // Toggle index
-    final nextIsFront = nextIndex < widget.cameras.length &&
-        widget.cameras[nextIndex].lensDirection == CameraLensDirection.front;
-    setState(() {
-      _cameraIndex = nextIndex;
-      _isInitializing = true;
-    });
-    await _initCamera(); // Khởi tạo lại camera mới
-  }
-
-  // ── Chuyển chế độ HDR ────────────────────────────────────────────────────────
-  /// Toggle giữa 3 chế độ: Auto → On → Off → Auto
-  void _cycleHdrMode() {
-    setState(() {
-      switch (_hdrMode) {
-        case HdrMode.auto:
-          _hdrMode = HdrMode.on; // Chuyển sang HDR bật
-          break;
-        case HdrMode.on:
-          _hdrMode = HdrMode.off; // Chuyển sang HDR tắt
-          break;
-        case HdrMode.off:
-          _hdrMode = HdrMode.auto; // Chuyển sang HDR auto
-          break;
-      }
-      _savePreference('pref_hdr_mode', _hdrMode.index);
-    });
-  }
-
-  // ── Chuyển chế độ chống rung (OIS / EIS / Super Steady) ─────────────────────────
-  /// Toggle giữa 3 chế độ: Off → Standard → Super Steady → Off
-  void _cycleStabilizationMode() {
-    setState(() {
-      switch (_stabilizationMode) {
-        case StabilizationMode.off:
-          _stabilizationMode = StabilizationMode.standard; // Bật OIS chuẩn
-          break;
-        case StabilizationMode.standard:
-          _stabilizationMode = StabilizationMode.superSteady; // Bật Super Steady
-          break;
-        case StabilizationMode.superSteady:
-          _stabilizationMode = StabilizationMode.off; // Tắt chống rung
-          break;
-      }
-      _savePreference('pref_stabilization_mode', _stabilizationMode.index);
-    });
-    _applyStabilization(); // Áp dụng chế độ mới
-  }
-
-  /// Áp dụng chế độ chống rung lên camera
-  Future<void> _applyStabilization() async {
-    if (_controller == null || !_controller!.value.isInitialized) return;
-    try {
-      if (_stabilizationMode != StabilizationMode.off) {
-        await _controller!.setFocusMode(FocusMode.auto); // Tự động lấy nét
-        await _controller!.setExposureMode(ExposureMode.auto); // Tự động phơi sáng
-      }
-    } catch (e) {
-      debugPrint('Stabilization apply error: $e');
-    }
-  }
-
-  // ── Chuyển chế độ Flash ─────────────────────────────────────────────────────────────
-  /// Toggle flash: chụp ảnh (off → auto → always), video (off → torch)
-  void _toggleFlash() {
-    if (_mode == CameraMode.photo) {
-      // Chế độ chụp ảnh: Tắt → Auto → Luôn bật → Tắt
-      final modes = [FlashMode.off, FlashMode.auto, FlashMode.always];
-      final next = modes[(modes.indexOf(_flashMode) + 1) % modes.length];
-      setState(() => _flashMode = next);
-      _controller?.setFlashMode(next);
-    } else {
-      // Chế độ video: Tắt → Torch (đèn pin) → Tắt
-      final next = _flashMode == FlashMode.torch || _flashMode == FlashMode.always
-          ? FlashMode.off
-          : FlashMode.torch;
-      setState(() => _flashMode = next);
-      _controller?.setFlashMode(next);
-    }
-  }
-
-  /// Lấy icon tương ứng với chế độ flash hiện tại
-  IconData get _flashIcon {
-    switch (_flashMode) {
-      case FlashMode.always:
-      case FlashMode.torch:
-        return Icons.flash_on; // Icon flash bật
-      case FlashMode.auto:
-        return Icons.flash_auto; // Icon flash auto
-      default:
-        return Icons.flash_off; // Icon flash tắt
-    }
-  }
-
-  // ── Helper chuyển đổi thời gian ──────────────────────────────────────────────────────────
-  /// Chuyển chuỗi timer thành số giây
-  int _photoTimerSeconds(String s) =>
-      {'3s': 3, '5s': 5, '10s': 10, '15s': 15}[s] ?? 0;
-
-  /// Chuyển chuỗi thời lượng video thành số giây
-  int _videoDurationSeconds(String s) =>
-      {'15s': 15, '30s': 30, '1 phút': 60, '3 phút': 180, '5 phút': 300, '10 phút': 600}[s] ?? 0;
-
-  /// Format số giây thành dạng MM:SS
-  String _formatDuration(int s) =>
-      '${(s ~/ 60).toString().padLeft(2, '0')}:${(s % 60).toString().padLeft(2, '0')}';
-
-  // ── Lấy thư mục lưu file ────────────────────────────────────────────────────────────
-  /// Tìm và xác thực thư mục có thể ghi file (ưu tiên SD card nếu được chọn)
-  /// Sử dụng biến cache để tránh kiểm tra I/O lặp lại khi chụp burst hoặc auto-interval
-  Future<String> _getSaveDir(bool isVideo) async {
-    final cached = isVideo ? _cachedVideoSaveDir : _cachedPhotoSaveDir;
-    if (cached != null && Directory(cached).existsSync()) {
-      return cached;
-    }
-
-    const appFolder = 'CameraApp2026'; // Tên thư mục app
-    final mediaTypeFolder = isVideo ? 'Movies' : 'Pictures'; // Thư mục theo loại media
-    String resolvedPath = '';
-
-    if (Platform.isAndroid) {
-      // ── 1. Nếu chọn thẻ SD Card ──
-      if (_storageLocation == StorageLocation.sdcard) {
-        final sdCandidates = <String>[];
-
-        // Thư mục công khai chuẩn trên SD Card (DCIM / Pictures / Movies / CameraApp2026)
+          // Thư mục công khai chuẩn trên SD Card (DCIM / Pictures / Movies / CameraApp2026)
         if (_sdcardRootPath != null) {
           sdCandidates.add(path.join(_sdcardRootPath!, 'DCIM', appFolder));
           sdCandidates.add(path.join(_sdcardRootPath!, mediaTypeFolder, appFolder));
@@ -924,7 +795,6 @@ class _CameraScreenState extends State<CameraScreen>
     return resolvedPath;
   }
 
-
   // ── Xử lý chụp ảnh ─────────────────────────────────────────────────────────────
   /// Xử lý khi người dùng nhấn nút chụp: timer, burst, hoặc chụp đơn
   Future<void> _handleCapture() async {
@@ -988,17 +858,14 @@ class _CameraScreenState extends State<CameraScreen>
   Future<void> _processCapturedPhoto(String sourcePath, String destPath) async {
     final applyHdr = _hdrMode == HdrMode.on || _hdrMode == HdrMode.auto; // Có bật HDR không
     final applyTimestamp = _showTimestamp; // Có hiển thị timestamp không
+    final applyGpsWatermark = _showGpsWatermark && (_lastGpsPosition != null); // Có hiển thị GPS watermark không
     final filterMatrix = FilterHelper.getMatrix(_selectedFilter); // Matrix filter màu
     final applyFilter = filterMatrix != null; // Có filter nào được chọn không
     // Lật ảnh chụp: NGƯỢC với setting để khử lật tự động của camera hardware
-    // Camera hardware tự động lật ảnh chụp camera trước theo mặc định
-    // BẬT lật (_mirrorFrontCamera = true) → không lật (khử lật hardware) → ảnh giống camera sau
-    // TẮT lật (_mirrorFrontCamera = false) → lật (giữ nguyên lật hardware) → ảnh như gương
     final applyMirror = _isFrontCamera && !_mirrorFrontCamera;
 
     // Nếu không có hiệu ứng nào, chỉ copy file (JPEG gốc từ camera giữ nguyên)
-    // EXIF sẽ được ghi sau bởi _writeExifMetadata()
-    if (!applyHdr && !applyTimestamp && !applyFilter && !applyMirror) {
+    if (!applyHdr && !applyTimestamp && !applyGpsWatermark && !applyFilter && !applyMirror) {
       await File(sourcePath).copy(destPath);
       return;
     }
@@ -1015,7 +882,6 @@ class _CameraScreenState extends State<CameraScreen>
       final canvas = Canvas(recorder); // Canvas để vẽ
 
       // Áp dụng lật ngang cho ảnh selfie camera trước
-      // Nếu preview không lật, thì ảnh chụp cũng không lật (đảo ngược logic camera hardware)
       if (applyMirror) {
         canvas.save();
         canvas.translate(image.width.toDouble(), 0); // Dịch sang phải
@@ -1058,14 +924,16 @@ class _CameraScreenState extends State<CameraScreen>
         canvas.restore();
       }
 
-      // 4. Timestamp Watermark (nếu được bật)
+      // 4. Watermarks: Timestamp & GPS Coordinates
+      final fontSize = (image.width * 0.026).clamp(24.0, 72.0); // Kích thước font
+      final padding = fontSize * 0.8;
+      double currentBottomY = image.height - padding;
+
+      // 4a. Timestamp Watermark (Góc dưới cùng bên phải)
       if (applyTimestamp) {
         final now = DateTime.now();
         final dateStr =
             '${now.day.toString().padLeft(2, '0')}/${now.month.toString().padLeft(2, '0')}/${now.year} ${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}';
-
-        final fontSize = (image.width * 0.026).clamp(24.0, 72.0); // Kích thước font theo kích thước ảnh
-        final padding = fontSize * 0.8;
 
         final textSpan = TextSpan(
           text: dateStr,
@@ -1075,7 +943,7 @@ class _CameraScreenState extends State<CameraScreen>
             fontWeight: FontWeight.normal,
             fontFamily: 'monospace',
             shadows: const [
-              Shadow(color: Colors.black, offset: Offset(2, 2), blurRadius: 4), // Bóng đổ
+              Shadow(color: Colors.black, offset: Offset(2, 2), blurRadius: 4),
               Shadow(color: Colors.black87, offset: Offset(-1, -1), blurRadius: 3),
             ],
           ),
@@ -1085,12 +953,12 @@ class _CameraScreenState extends State<CameraScreen>
           text: textSpan,
           textDirection: TextDirection.ltr,
         );
-        textPainter.layout(); // Tính toán kích thước text
+        textPainter.layout();
 
-        final x = image.width - textPainter.width - padding; // Vị trí x (góc phải)
-        final y = image.height - textPainter.height - padding; // Vị trí y (góc dưới)
+        final x = image.width - textPainter.width - padding;
+        final y = currentBottomY - textPainter.height;
 
-        // Vẽ nền đằng sau timestamp
+        // Nền đen bán trong suốt cho timestamp
         final bgRect = RRect.fromRectAndRadius(
           Rect.fromLTWH(
             x - padding * 0.4,
@@ -1102,10 +970,50 @@ class _CameraScreenState extends State<CameraScreen>
         );
         canvas.drawRRect(
           bgRect,
-          Paint()..color = Colors.black.withAlpha(100), // Nền đen trong suốt 45%
+          Paint()..color = Colors.black.withAlpha(100),
         );
 
-        textPainter.paint(canvas, Offset(x, y)); // Vẽ text timestamp
+        textPainter.paint(canvas, Offset(x, y));
+        // Đẩy vị trí GPS lên trên timestamp (cách 1 khoảng vừa phải)
+        currentBottomY = y - (padding * 0.5);
+      }
+
+      // 4b. GPS Watermark (Hiển thị PHÍA TRÊN timestamp, KHÔNG CÓ NỀN)
+      if (applyGpsWatermark && _lastGpsPosition != null) {
+        final pos = _lastGpsPosition!;
+        final latStr = '${pos.latitude.abs().toStringAsFixed(5)}°${pos.latitude >= 0 ? 'N' : 'S'}';
+        final lonStr = '${pos.longitude.abs().toStringAsFixed(5)}°${pos.longitude >= 0 ? 'E' : 'W'}';
+        final gpsStr = '📍 $latStr, $lonStr';
+
+        final gpsFontSize = fontSize * 0.85; // Cỡ chữ nhỏ gọn hơn chút so với ngày giờ
+        final gpsTextSpan = TextSpan(
+          text: gpsStr,
+          style: TextStyle(
+            color: const Color(0xFFFFE000), // Màu vàng đồng bộ
+            fontSize: gpsFontSize,
+            fontWeight: FontWeight.w600,
+            fontFamily: 'monospace',
+            shadows: const [
+              // Shadow đậm để đọc rõ trên mọi nền mà không cần màu nền ô
+              Shadow(color: Colors.black, offset: Offset(2, 2), blurRadius: 4),
+              Shadow(color: Colors.black87, offset: Offset(-1, -1), blurRadius: 4),
+              Shadow(color: Colors.black, offset: Offset(1, -1), blurRadius: 3),
+              Shadow(color: Colors.black, offset: Offset(-1, 1), blurRadius: 3),
+            ],
+          ),
+        );
+
+        final gpsTextPainter = TextPainter(
+          text: gpsTextSpan,
+          textDirection: TextDirection.ltr,
+        );
+        gpsTextPainter.layout();
+
+        final gx = image.width - gpsTextPainter.width - padding;
+        final gy = currentBottomY - gpsTextPainter.height;
+
+        // Không vẽ bgRect theo yêu cầu, chỉ vẽ text với shadow bảo vệ
+        gpsTextPainter.paint(canvas, Offset(gx, gy));
       }
 
       final picture = recorder.endRecording(); // Kết thúc vẽ
@@ -1140,7 +1048,7 @@ class _CameraScreenState extends State<CameraScreen>
       image?.dispose();
       outputImage?.dispose();
     }
-  }
+
 
   // ── Isolate Task: Encode ảnh JPEG trên background thread ────────────────────
   static Uint8List _encodeJpgTask(Map<String, dynamic> params) {
@@ -2462,6 +2370,15 @@ class _CameraScreenState extends State<CameraScreen>
                   onChanged: (v) {
                     setState(() => _showTimestamp = v);
                     _savePreference('pref_show_timestamp', v);
+                  },
+                ),
+                const SizedBox(height: 18),
+                // GPS Watermark (Vị trí GPS trên ảnh)
+                GpsWatermarkSelector(
+                  enabled: _showGpsWatermark,
+                  onChanged: (v) {
+                    setState(() => _showGpsWatermark = v);
+                    _savePreference('pref_show_gps_watermark', v);
                   },
                 ),
               ] else ...[
