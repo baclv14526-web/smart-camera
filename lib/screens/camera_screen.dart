@@ -503,15 +503,15 @@ class _CameraScreenState extends State<CameraScreen>
       // Cấu hình Fused Location Provider cho Android
       // forceLocationManager: false → dùng Google Play Services (GPS + Mạng + WiFi tích hợp)
       // LocationAccuracy.medium → ~100m, kích hoạt cả GPS lẫn network provider
-      const androidSettings = AndroidSettings(
+      final androidSettings = AndroidSettings(
         accuracy: LocationAccuracy.medium,
         distanceFilter: 10,              // Cập nhật khi di chuyển ≥ 10 mét
         forceLocationManager: false,     // Dùng Fused (GPS + mạng + WiFi), KHÔNG chỉ GPS thuần
-        intervalDuration: Duration(seconds: 5), // Cập nhật tối đa mỗi 5 giây
+        intervalDuration: const Duration(seconds: 5), // Cập nhật tối đa mỗi 5 giây
         // Cho phép dùng WiFi scanning để xác định vị trí
         foregroundNotificationConfig: null,
       );
-      const appleSettings = AppleSettings(
+      final appleSettings = AppleSettings(
         accuracy: LocationAccuracy.medium,
         distanceFilter: 10,
         activityType: ActivityType.other,
@@ -535,10 +535,10 @@ class _CameraScreenState extends State<CameraScreen>
       try {
         final pos = await Geolocator.getCurrentPosition(
           locationSettings: Platform.isAndroid
-              ? const AndroidSettings(
+              ? AndroidSettings(
                   accuracy: LocationAccuracy.medium,
                   forceLocationManager: false, // Fused Location Provider
-                  timeLimit: Duration(seconds: 8),
+                  timeLimit: const Duration(seconds: 8),
                 )
               : const LocationSettings(
                   accuracy: LocationAccuracy.medium,
