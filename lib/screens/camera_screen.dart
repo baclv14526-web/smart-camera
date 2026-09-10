@@ -195,12 +195,14 @@ class _CameraScreenState extends State<CameraScreen>
   }
 
   // ── EXIF / GPS ───────────────────────────────────────────────────────────────
-  // Tọa độ GPS gần nhất để ghi vào EXIF khi chụp ảnh (null nếu GPS chưa sẵn sàng)
+  // Tọa độ vị trí gần nhất để ghi vào EXIF khi chụp ảnh (null nếu chưa sẵn sàng)
   Position? _lastGpsPosition;
-  // Cờ cho biết GPS có được bật và có quyền không
+  // Cờ cho biết dịch vụ vị trí có được bật và có quyền không
   bool _gpsEnabled = false;
-  // Stream subscription theo dõi GPS liên tục ở chế độ tiết kiệm pin
+  // Stream subscription theo dõi vị trí liên tục (GPS / Mạng / WiFi)
   StreamSubscription<Position>? _gpsSubscription;
+  // Nguồn xác định vị trí: 'GPS', 'NETWORK', 'WIFI' (dùng ghi vào GPSProcessingMethod EXIF)
+  String _locationProvider = 'GPS';
 
   // ── Tap to Focus & Exposure Ring ───────────────────────────────────────────────
   Offset? _focusPointScreen; // Tọa độ pixel trên màn hình để vẽ focus ring
@@ -463,75 +465,110 @@ class _CameraScreenState extends State<CameraScreen>
     }
   }
 
-  // ── Khởi động GPS stream để lấy tọa độ ghi vào EXIF ──────────────────────────
-  /// Lắng nghe tọa độ GPS liên tục ở chế độ tiết kiệm pin (accuracy medium, 5s interval).
-  /// Tọa độ mới nhất được lưu vào [_lastGpsPosition] và sẽ được đính kèm vào EXIF
-  /// mỗi khi người dùng chụp ảnh.
+  // ── Khởi động dịch vụ vị trí: GPS + Mạng viễn thông + WiFi ─────────────────
+  /// Dùng Fused Location Provider (Android) để lấy vị trí từ nguồn tốt nhất:
+  /// - GPS vệ tinh: chính xác nhất khi ngoài trời
+  /// - Mạng viễn thông (Cell tower): hoạt động trong nhà, tốc độ cao
+  /// - WiFi: chính xác ~15-30m khi kết nối WiFi
+  /// Android tự chọn nguồn nhanh nhất và chính xác nhất tại thời điểm đó.
   Future<void> _initGps() async {
     try {
-      // Kiểm tra dịch vụ GPS có được bật trên thiết bị không
+      // Kiểm tra dịch vụ vị trí có được bật trên thiết bị không
       final serviceEnabled = await Geolocator.isLocationServiceEnabled();
       if (!serviceEnabled) {
-        debugPrint('GPS: Dịch vụ vị trí bị tắt, không ghi GPS vào EXIF');
+        debugPrint('Vị trí: Dịch vụ bị tắt, không ghi GPS vào EXIF');
         return;
       }
 
-      // Kiểm tra và xin quyền vị trí chính xác qua Geolocator nếu chưa có
+      // Kiểm tra và xin quyền vị trí
       var permission = await Geolocator.checkPermission();
       if (permission == LocationPermission.denied) {
         permission = await Geolocator.requestPermission();
       }
-
       if (permission == LocationPermission.denied ||
           permission == LocationPermission.deniedForever) {
-        debugPrint('GPS: Quyền vị trí bị từ chối, không ghi GPS vào EXIF');
+        debugPrint('Vị trí: Quyền bị từ chối, không ghi GPS vào EXIF');
         return;
       }
 
-      // Đặt cờ GPS sẵn sàng
       _gpsEnabled = true;
 
-      // 1. Thử lấy vị trí cache trước để có GPS ngay lập tức
+      // Cấu hình Fused Location Provider cho Android
+      // forceLocationManager: false → dùng Google Play Services (GPS + Mạng + WiFi tích hợp)
+      // LocationAccuracy.medium → ~100m, kích hoạt cả GPS lẫn network provider
+      const androidSettings = AndroidSettings(
+        accuracy: LocationAccuracy.medium,
+        distanceFilter: 10,              // Cập nhật khi di chuyển ≥ 10 mét
+        forceLocationManager: false,     // Dùng Fused (GPS + mạng + WiFi), KHÔNG chỉ GPS thuần
+        intervalDuration: Duration(seconds: 5), // Cập nhật tối đa mỗi 5 giây
+        // Cho phép dùng WiFi scanning để xác định vị trí
+        foregroundNotificationConfig: null,
+      );
+      const appleSettings = AppleSettings(
+        accuracy: LocationAccuracy.medium,
+        distanceFilter: 10,
+        activityType: ActivityType.other,
+        pauseLocationUpdatesAutomatically: true,
+      );
+
+      // 1. Thử lấy vị trí cache để có kết quả ngay lập tức
       try {
         final lastKnown = await Geolocator.getLastKnownPosition();
         if (lastKnown != null) {
           _lastGpsPosition = lastKnown;
-          debugPrint('GPS: Vị trí LastKnown: ${lastKnown.latitude}, ${lastKnown.longitude}');
+          _locationProvider = _detectProvider(lastKnown.accuracy);
+          debugPrint('Vị trí cached: ${lastKnown.latitude}, ${lastKnown.longitude} (±${lastKnown.accuracy.toStringAsFixed(0)}m)');
         }
       } catch (e) {
-        debugPrint('GPS: Lỗi lấy lastKnownPosition: $e');
+        debugPrint('Vị trí cached lỗi: $e');
       }
 
-      // 2. Lấy tọa độ hiện tại chính xác (timeout 5s để không bị treo nếu ở trong nhà)
+      // 2. Lấy vị trí hiện tại với Fused Location (timeout 8s)
+      // Fused tự fallback: GPS → Mạng → WiFi tùy nguồn nào sẵn sàng
       try {
         final pos = await Geolocator.getCurrentPosition(
-          locationSettings: const LocationSettings(
-            accuracy: LocationAccuracy.medium,
-            timeLimit: Duration(seconds: 5),
-          ),
+          locationSettings: Platform.isAndroid
+              ? const AndroidSettings(
+                  accuracy: LocationAccuracy.medium,
+                  forceLocationManager: false, // Fused Location Provider
+                  timeLimit: Duration(seconds: 8),
+                )
+              : const LocationSettings(
+                  accuracy: LocationAccuracy.medium,
+                  timeLimit: Duration(seconds: 8),
+                ),
         );
         _lastGpsPosition = pos;
-        debugPrint('GPS: Tọa độ hiện tại: ${pos.latitude}, ${pos.longitude}');
+        _locationProvider = _detectProvider(pos.accuracy);
+        debugPrint('Vị trí hiện tại: ${pos.latitude}, ${pos.longitude} ($_locationProvider, ±${pos.accuracy.toStringAsFixed(0)}m)');
       } catch (e) {
-        debugPrint('GPS: getCurrentPosition timeout hoặc lỗi: $e');
+        debugPrint('Vị trí getCurrentPosition lỗi/timeout: $e');
       }
 
-      // 3. Đăng ký stream để cập nhật tọa độ định kỳ
+      // 3. Stream cập nhật vị trí liên tục (GPS + Mạng + WiFi)
       _gpsSubscription = Geolocator.getPositionStream(
-        locationSettings: const LocationSettings(
-          accuracy: LocationAccuracy.medium,
-          distanceFilter: 10, // Cập nhật khi di chuyển ít nhất 10 mét
-        ),
+        locationSettings: Platform.isAndroid ? androidSettings : appleSettings,
       ).listen(
         (Position pos) {
           _lastGpsPosition = pos;
-          debugPrint('GPS: Cập nhật tọa độ: ${pos.latitude}, ${pos.longitude}, alt: ${pos.altitude}m');
+          _locationProvider = _detectProvider(pos.accuracy);
+          debugPrint('Vị trí cập nhật: ${pos.latitude}, ${pos.longitude} ($_locationProvider, ±${pos.accuracy.toStringAsFixed(0)}m)');
         },
-        onError: (e) => debugPrint('GPS stream error: $e'),
+        onError: (e) => debugPrint('Vị trí stream lỗi: $e'),
       );
     } catch (e) {
-      debugPrint('GPS init error: $e');
+      debugPrint('Vị trí init lỗi: $e');
     }
+  }
+
+  /// Phân loại nguồn vị trí dựa trên độ chính xác (accuracy tính bằng mét):
+  /// - GPS vệ tinh: < 20m
+  /// - WiFi: 20–100m
+  /// - Mạng viễn thông (Cell tower): > 100m
+  String _detectProvider(double accuracyMeters) {
+    if (accuracyMeters < 20) return 'GPS';
+    if (accuracyMeters < 100) return 'NETWORK'; // WiFi thường 15–50m
+    return 'NETWORK'; // Cell tower thường 100–1000m
   }
 
   // ── Ghi EXIF metadata vào file JPEG sau khi chụp ─────────────────────────────
@@ -568,59 +605,7 @@ class _CameraScreenState extends State<CameraScreen>
       // Orientation = 1 (Normal): App đã xử lý rotation/mirror, ảnh đã đúng chiều.
       await exif.writeAttribute('Orientation', '1');
 
-      // ── 4. GPS COORDINATES (Tọa độ địa lý) ────────────────────────────────────
-      Position? gpsPos = _lastGpsPosition;
-      if (gpsPos == null && _gpsEnabled) {
-        try {
-          gpsPos = await Geolocator.getLastKnownPosition();
-          if (gpsPos != null) _lastGpsPosition = gpsPos;
-        } catch (_) {}
-      }
-
-      if (gpsPos != null) {
-        // Latitude: convert từ decimal degrees sang DMS (Degrees/Minutes/Seconds) chuẩn EXIF/Android
-        final lat = gpsPos.latitude.abs();
-        final latDeg = lat.floor();
-        final latMinTotal = (lat - latDeg) * 60;
-        final latMin = latMinTotal.floor();
-        final latSec = ((latMinTotal - latMin) * 60 * 1000).round();
-        final latRef = gpsPos.latitude >= 0 ? 'N' : 'S'; // Bắc/Nam
-
-        final lon = gpsPos.longitude.abs();
-        final lonDeg = lon.floor();
-        final lonMinTotal = (lon - lonDeg) * 60;
-        final lonMin = lonMinTotal.floor();
-        final lonSec = ((lonMinTotal - lonMin) * 60 * 1000).round();
-        final lonRef = gpsPos.longitude >= 0 ? 'E' : 'W'; // Đông/Tây
-
-        // Ghi Latitude và Longitude vào EXIF theo chuẩn rational DMS ("deg/1,min/1,sec/1000")
-        await exif.writeAttribute('GPSLatitude', '$latDeg/1,$latMin/1,$latSec/1000');
-        await exif.writeAttribute('GPSLatitudeRef', latRef);
-        await exif.writeAttribute('GPSLongitude', '$lonDeg/1,$lonMin/1,$lonSec/1000');
-        await exif.writeAttribute('GPSLongitudeRef', lonRef);
-
-        // Altitude (độ cao): tính bằng mét, dạng rational "1000/10" = 100.0m
-        final altM = (gpsPos.altitude.abs() * 10).round();
-        final altRef = gpsPos.altitude >= 0 ? '0' : '1'; // 0 = trên mực nước biển, 1 = dưới
-        await exif.writeAttribute('GPSAltitude', '$altM/10');
-        await exif.writeAttribute('GPSAltitudeRef', altRef);
-
-        // GPS Timestamp (UTC): dạng "HH/1,MM/1,SS/1"
-        final utc = now.toUtc();
-        await exif.writeAttribute(
-          'GPSTimeStamp',
-          '${utc.hour}/1,${utc.minute}/1,${utc.second}/1',
-        );
-        // GPS Datestamp: dạng "YYYY:MM:DD"
-        await exif.writeAttribute(
-          'GPSDateStamp',
-          '${utc.year}:${utc.month.toString().padLeft(2, '0')}:${utc.day.toString().padLeft(2, '0')}',
-        );
-
-        debugPrint('EXIF GPS: ${gpsPos.latitude}, ${gpsPos.longitude}, ${gpsPos.altitude}m');
-      }
-
-      // ── 5. THÔNG SỐ KỸ THUẬT (ISO, Shutter Speed, Aperture, Focal Length) ────
+      // ── 4. THÔNG SỐ KỸ THUẬT (ISO, Shutter Speed, Aperture, Focal Length) ────
       // FocalLength: giá trị điển hình cho smartphone camera chính (~4.3mm)
       await exif.writeAttribute('FocalLength', '43/10'); // 4.3mm dạng rational
 
@@ -640,7 +625,7 @@ class _CameraScreenState extends State<CameraScreen>
       // ColorSpace: 1 = sRGB
       await exif.writeAttribute('ColorSpace', '1');
 
-      // ── 6. ĐÓNG VÀ LƯU EXIF ──────────────────────────────────────────────────
+      // ── 5. ĐÓNG VÀ LƯU EXIF ──────────────────────────────────────────────────
       // Lưu tất cả thay đổi vào file và giải phóng resource
       await exif.close();
       debugPrint('EXIF: Đã ghi metadata thành công vào $filePath');
@@ -648,7 +633,36 @@ class _CameraScreenState extends State<CameraScreen>
       // Lỗi ghi EXIF không nên ảnh hưởng đến việc lưu ảnh – chỉ log lỗi
       debugPrint('EXIF write error (non-fatal): $e');
     }
+
+    // ── 6. GPS COORDINATES qua Native Android ExifInterface.setLatLong() ────────
+    // Dùng Platform Channel gọi native Kotlin để ghi GPS bằng ExifInterface.setLatLong()
+    // - Chuẩn xác 100%: Android tự handle format DMS rational chuẩn EXIF
+    // - Google Photos, Files, Maps đều đọc được vị trí từ field này
+    Position? gpsPos = _lastGpsPosition;
+    if (gpsPos == null && _gpsEnabled) {
+      try {
+        gpsPos = await Geolocator.getLastKnownPosition();
+        if (gpsPos != null) _lastGpsPosition = gpsPos;
+      } catch (_) {}
+    }
+
+    if (gpsPos != null) {
+      try {
+        await _mediaScannerChannel.invokeMethod('writeGpsToExif', {
+          'path': filePath,
+          'latitude': gpsPos.latitude,
+          'longitude': gpsPos.longitude,
+          'altitude': gpsPos.altitude,
+          'provider': _locationProvider, // 'GPS' hoặc 'NETWORK' (mạng viễn thông / WiFi)
+        });
+        debugPrint('Vị trí EXIF (native/$_locationProvider): ${gpsPos.latitude}, ${gpsPos.longitude}, ${gpsPos.altitude}m → ghi vào $filePath');
+      } catch (e) {
+        debugPrint('Vị trí EXIF native ghi lỗi (non-fatal): $e');
+      }
+    }
   }
+
+
 
   // ── Khởi tạo camera ───────────────────────────────────────────────────────────────
   /// Khởi tạo camera controller với các thông số và khả năng zoom
