@@ -312,6 +312,13 @@ class _CameraScreenState extends State<CameraScreen>
         _burstCount = prefs.getInt('pref_burst_count') ?? _burstCount;
         // Auto Interval
         _autoIntervalEnabled = prefs.getBool('pref_auto_interval') ?? _autoIntervalEnabled;
+        // Độ phân giải camera (HD / Full HD)
+        final resolutionKey = prefs.getString('pref_resolution');
+        if (resolutionKey == 'high') {
+          _resolution = ResolutionPreset.high; // HD 720p
+        } else if (resolutionKey == 'veryHigh') {
+          _resolution = ResolutionPreset.veryHigh; // Full HD 1080p
+        }
       });
     } catch (e) {
       debugPrint('Load preferences error: $e');
@@ -1688,6 +1695,9 @@ class _CameraScreenState extends State<CameraScreen>
   Future<void> _changeQuality(ResolutionPreset preset) async {
     if (_isRecording) return; // Không đổi khi đang quay
     setState(() { _resolution = preset; _isInitializing = true; });
+    // Lưu cài đặt độ phân giải vào SharedPreferences để giữ nguyên sau khi đóng app
+    final resKey = preset == ResolutionPreset.veryHigh ? 'veryHigh' : 'high';
+    unawaited(_savePreference('pref_resolution', resKey));
     await _initCamera(); // Khởi tạo lại camera với chất lượng mới
   }
 
