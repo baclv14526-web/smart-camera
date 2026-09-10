@@ -580,64 +580,114 @@ class _CameraScreenState extends State<CameraScreen>
 
   // ── Ghi EXIF metadata vào file JPEG sau khi chụp ─────────────────────────────
   /// Ghi đầy đủ các EXIF tags vào file JPEG bao gồm:
-  /// - Thông tin thời gian: DateTimeOriginal theo định dạng EXIF chuẩn
-  /// - Thông tin thiết bị: Make, Model, Software
-  /// - Orientation: đánh dấu ảnh đã được xử lý đúng chiều
-  /// - GPS: Latitude, Longitude, Altitude (nếu GPS sẵn sàng)
-  /// - Thông số kỹ thuật: ISO, ExposureTime, FNumber, FocalLength (nếu camera cung cấp)
+  /// - Thời gian: DateTimeOriginal, DateTimeDigitized, DateTime (chuẩn EXIF)
+  /// - Thiết bị: Make, Model, Software, Orientation
+  /// - Thông số quang học: FocalLength, FNumber, FocalLengthIn35mm (động theo camera trước/sau)
+  /// - Phơi sáng: ISO, ExposureTime, ExposureProgram, MeteringMode, WhiteBalance, Flash
+  /// - Zoom: DigitalZoomRatio (zoom hiện tại của người dùng)
+  /// - Kích thước ảnh: PixelXDimension, PixelYDimension (theo ResolutionPreset)
+  /// - Cảnh chụp: SceneCaptureType, SubjectDistanceRange, LightSource
+  /// - GPS: ghi qua native ExifInterface.setLatLong() (chuẩn xác, Google Photos đọc được)
   Future<void> _writeExifMetadata(String filePath) async {
     try {
-      // Mở file JPEG bằng native_exif để ghi metadata
       final exif = await Exif.fromPath(filePath);
-
-      // ── 1. THÔNG TIN THỜI GIAN (DateTime theo chuẩn EXIF: yyyy:MM:dd HH:mm:ss) ──
       final now = DateTime.now();
-      // Định dạng EXIF chuẩn: "2026:09:09 22:10:00" (dấu ':' phân cách cả ngày lẫn giờ)
+
+      // ── 1. THỜI GIAN (chuẩn EXIF: "yyyy:MM:dd HH:mm:ss") ────────────────────
       final exifDateStr =
           '${now.year}:${now.month.toString().padLeft(2, '0')}:${now.day.toString().padLeft(2, '0')} '
           '${now.hour.toString().padLeft(2, '0')}:${now.minute.toString().padLeft(2, '0')}:${now.second.toString().padLeft(2, '0')}';
+      await exif.writeAttribute('DateTimeOriginal', exifDateStr);
+      await exif.writeAttribute('DateTimeDigitized', exifDateStr);
+      await exif.writeAttribute('DateTime', exifDateStr);
 
-      await exif.writeAttribute('DateTimeOriginal', exifDateStr); // Thời điểm chụp gốc
-      await exif.writeAttribute('DateTimeDigitized', exifDateStr); // Thời điểm số hoá
-      await exif.writeAttribute('DateTime', exifDateStr); // Thời gian chỉnh sửa file
-
-      // ── 2. THÔNG TIN THIẾT BỊ (Make, Model, Software) ──────────────────────────
-      // Ghi thông tin hãng sản xuất và model máy thực tế của điện thoại
+      // ── 2. THÔNG TIN THIẾT BỊ ────────────────────────────────────────────────
       final cameraFacing = _isFrontCamera ? 'Front Camera' : 'Rear Camera';
-      await exif.writeAttribute('Make', _deviceManufacturer); // Hãng sản xuất (Samsung, Xiaomi, Google, Sony, Apple...)
-      await exif.writeAttribute('Model', '$_deviceModel ($cameraFacing)'); // Model thiết bị (SM-S918B, Pixel 8,...)
-      await exif.writeAttribute('Software', 'CameraApp2026 v1.0.0'); // Tên phần mềm chụp ảnh
+      await exif.writeAttribute('Make', _deviceManufacturer);
+      await exif.writeAttribute('Model', '$_deviceModel ($cameraFacing)');
+      await exif.writeAttribute('Software', 'CameraApp2026 v1.0.0');
+      await exif.writeAttribute('Orientation', '1'); // App đã xử lý đúng chiều
 
-      // ── 3. ORIENTATION (Chiều ảnh) ───────────────────────────────────────────────
-      // Orientation = 1 (Normal): App đã xử lý rotation/mirror, ảnh đã đúng chiều.
-      await exif.writeAttribute('Orientation', '1');
+      // ── 3. THÔNG SỐ QUANG HỌC (FocalLength, FNumber, FocalLengthIn35mm) ────
+      // Camera trước (selfie): tiêu cự ngắn hơn ~2.5mm, khẩu độ rộng hơn f/2.0
+      // Camera sau (chính):    tiêu cự ~4.3mm, khẩu độ f/1.8
+      // Các giá trị này điển hình cho smartphone; camera thực tế sẽ có EXIF gốc
+      // nhưng sau khi re-encode qua canvas, ta ghi lại giá trị đặc trưng.
+      if (_isFrontCamera) {
+        await exif.writeAttribute('FocalLength', '25/10');     // 2.5mm front camera
+        await exif.writeAttribute('FNumber', '2/1');           // f/2.0 front camera
+        await exif.writeAttribute('FocalLengthIn35mmFilm', '24'); // ~24mm 35mm equiv
+      } else {
+        await exif.writeAttribute('FocalLength', '43/10');     // 4.3mm rear camera
+        await exif.writeAttribute('FNumber', '9/5');           // f/1.8 rear camera
+        await exif.writeAttribute('FocalLengthIn35mmFilm', '26'); // ~26mm 35mm equiv
+      }
 
-      // ── 4. THÔNG SỐ KỸ THUẬT (ISO, Shutter Speed, Aperture, Focal Length) ────
-      // FocalLength: giá trị điển hình cho smartphone camera chính (~4.3mm)
-      await exif.writeAttribute('FocalLength', '43/10'); // 4.3mm dạng rational
+      // SensingMethod: 2 = One-chip color area sensor (CMOS smartphone)
+      await exif.writeAttribute('SensingMethod', '2');
 
-      // FNumber (Aperture): f/1.8 điển hình cho camera smartphone
-      await exif.writeAttribute('FNumber', '9/5'); // f/1.8 = 9/5 dạng rational
+      // ── 4. THÔNG SỐ PHƠI SÁNG ────────────────────────────────────────────────
+      // ISO: 100 (điều kiện ánh sáng tốt) — camera tự điều chỉnh, đây là giá trị điển hình
+      // App không có API đọc ISO thực tế từ flutter camera package, nên ghi giá trị tiêu biểu
+      await exif.writeAttribute('ISOSpeedRatings', '100');
 
-      // ExposureProgram: 2 = Normal program (auto exposure)
+      // ExposureTime: 1/60s điển hình (dạng rational "1/60")
+      await exif.writeAttribute('ExposureTime', '1/60');
+
+      // ExposureBiasValue: 0 (không bù phơi sáng, auto exposure)
+      await exif.writeAttribute('ExposureBiasValue', '0/1');
+
+      // ExposureProgram: 2 = Normal program (auto)
       await exif.writeAttribute('ExposureProgram', '2');
 
-      // MeteringMode: 5 = Pattern (matrix metering)
+      // MeteringMode: 5 = Pattern (matrix metering toàn khung hình)
       await exif.writeAttribute('MeteringMode', '5');
 
-      // Flash: 0 = Flash did not fire (tắt), 1 = Flash fired (bật)
+      // WhiteBalance: 0 = Auto white balance
+      await exif.writeAttribute('WhiteBalance', '0');
+
+      // LightSource: 0 = Unknown / Auto (camera tự điều chỉnh)
+      await exif.writeAttribute('LightSource', '0');
+
+      // Flash: 1 = fired, 0 = không bật
       final flashFired = (_flashMode == FlashMode.always || _flashMode == FlashMode.torch) ? '1' : '0';
       await exif.writeAttribute('Flash', flashFired);
 
       // ColorSpace: 1 = sRGB
       await exif.writeAttribute('ColorSpace', '1');
 
-      // ── 5. ĐÓNG VÀ LƯU EXIF ──────────────────────────────────────────────────
-      // Lưu tất cả thay đổi vào file và giải phóng resource
+      // ── 5. ZOOM & KÍCH THƯỚC ẢNH ─────────────────────────────────────────────
+      // DigitalZoomRatio: mức zoom số hiện tại (1.0 = không zoom, 2.0 = 2x zoom...)
+      // Dạng rational: "numerator/1000" → "1000/1000" = 1.0x, "2000/1000" = 2.0x
+      final zoomNum = (_currentZoom * 1000).round();
+      await exif.writeAttribute('DigitalZoomRatio', '$zoomNum/1000');
+
+      // Kích thước ảnh theo ResolutionPreset (pixel width × height)
+      // veryHigh = Full HD 1080p (~3840×2160 hoặc 4032×3024 tùy sensor)
+      // high     = HD 720p (~1920×1080 hoặc 2592×1944 tùy sensor)
+      // Ta ghi kích thước điển hình để ứng dụng xem ảnh hiển thị đúng
+      final isFullHD = _resolution == ResolutionPreset.veryHigh;
+      await exif.writeAttribute('PixelXDimension', isFullHD ? '4032' : '2592');
+      await exif.writeAttribute('PixelYDimension', isFullHD ? '3024' : '1944');
+
+      // ── 6. LOẠI CẢNH & CHỦ THỂ ─────────────────────────────────────────────
+      // SceneCaptureType: 0 = Standard, 1 = Landscape, 2 = Portrait, 3 = Night
+      // Camera trước thường chụp chân dung (selfie)
+      final sceneType = _isFrontCamera ? '2' : '0'; // Portrait hoặc Standard
+      await exif.writeAttribute('SceneCaptureType', sceneType);
+
+      // SubjectDistanceRange: 0 = Unknown, 1 = Macro, 2 = Close, 3 = Distant
+      await exif.writeAttribute('SubjectDistanceRange', '0');
+
+      // ── 7. ĐỘ PHÂN GIẢI (X/Y Resolution) ──────────────────────────────────
+      await exif.writeAttribute('XResolution', '72/1'); // 72 DPI tiêu chuẩn
+      await exif.writeAttribute('YResolution', '72/1');
+      await exif.writeAttribute('ResolutionUnit', '2'); // 2 = inch
+
+      // ── LƯU VÀ ĐÓNG ─────────────────────────────────────────────────────────
       await exif.close();
-      debugPrint('EXIF: Đã ghi metadata thành công vào $filePath');
+      debugPrint('EXIF: Ghi metadata thành công ($cameraFacing, zoom=${_currentZoom}x, ${isFullHD ? "FullHD" : "HD"})');
     } catch (e) {
-      // Lỗi ghi EXIF không nên ảnh hưởng đến việc lưu ảnh – chỉ log lỗi
       debugPrint('EXIF write error (non-fatal): $e');
     }
 
